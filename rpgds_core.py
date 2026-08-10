@@ -799,7 +799,13 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
     # the complete palette role (highlight, shadow and outline), not just a
     # visually similar resting color.
     band_height = 32
-    region_width = 128
+    # Palette roles on keypad/editor sheets can sit side-by-side inside the
+    # same 128-pixel half-screen (for example blue number keys beside green
+    # clipboard buttons).  A half-screen domain mixes those banks and can
+    # recolor a translated button even when its source pixels use the original
+    # palette.  Use sprite-sized horizontal domains instead; empty domains
+    # still inherit from their nearest populated neighbour below.
+    region_width = 32 if layout.width >= 128 else 128
     region_usage: dict[tuple[int, int], Counter[int]] = {}
     for y_start in range(0, layout.height, band_height):
         for x_start in range(0, layout.width, region_width):

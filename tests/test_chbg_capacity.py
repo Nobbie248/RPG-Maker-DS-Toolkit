@@ -409,6 +409,30 @@ class CHBGPaletteMappingTests(unittest.TestCase):
 
         self.assertEqual(palette_index_at(result.data, 0, 4), 1)
         self.assertEqual(palette_index_at(result.data, 128, 4), 5)
+
+    def test_adjacent_keypad_buttons_keep_separate_palette_roles(self) -> None:
+        # Keypad sheets place differently animated button banks only 32 pixels
+        # apart.  Translating the green button must not borrow the nearby blue
+        # bank merely because both live in the same 128-pixel half-screen.
+        palette = [0] * 256
+        palette[0] = 0x03E0
+        palette[1] = 0x7C00       # blue role
+        palette[2] = 0x7FFF
+        palette[5] = 0x03E0       # green role
+        palette[6] = 0x7FFF
+        original = make_chbg(
+            [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2],
+            [uniform_tile(0), bytes([2] + [1] * 63), bytes([6] + [5] * 63)],
+            palette_values=tuple(palette),
+        )
+        target = decode_chbg(original, False)
+        # A newly painted exact-white glyph in each bank must choose that
+        # bank's duplicate white index, not whichever white is more common.
+        target.putpixel((36, 4), (255, 255, 255))
+        target.putpixel((68, 4), (255, 255, 255))
+        result = prepare_chbg_replacement(target, original, False)
+        self.assertEqual(palette_index_at(result.data, 36, 4), 2)
+        self.assertEqual(palette_index_at(result.data, 68, 4), 6)
         self.assertEqual(
             decode_chbg(result.data, False).tobytes(), target.tobytes(),
         )
