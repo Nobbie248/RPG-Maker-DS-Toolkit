@@ -731,6 +731,7 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
     # 4bpp graphics can only use the first 16 entries; 8bpp can use all 256.
     color_limit = min(layout.colors, 16 if layout.bpp == 4 else 256)
     palette = list(layout.palette)
+    palette_data = bytearray(layout.palette_data)
     key_color = layout.palette[0]
     rgba_pixels = list(image.convert("RGBA").get_flattened_data())
     pixels: list[tuple[int, int, int]] = []
@@ -793,6 +794,36 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
         )
 
     palette_usage = Counter(original_indices)
+    if allow_global_exact_palette and layout.bpp == 8:
+        # Static artwork can safely use palette entries that no stored tile
+        # references. Add missing source colors there instead of replacing
+        # them with unrelated local-role colors. Quantize through BGR555 first
+        # so the preview exactly represents what the DS will render.
+        stored_indices = set(layout.tile_data)
+        free_indices = [
+            index for index in range(1, color_limit)
+            if index not in stored_indices
+        ]
+        quantized_usage: Counter[tuple[int, int, int]] = Counter()
+        quantized_value: dict[tuple[int, int, int], int] = {}
+        for pixel in pixels:
+            value = _rgb_to_bgr555(pixel)
+            rendered = _bgr555_to_rgb(value)
+            quantized_usage[rendered] += 1
+            quantized_value[rendered] = value
+        existing_colors = set(palette[:color_limit])
+        missing_colors = sorted(
+            (color for color in quantized_usage if color not in existing_colors),
+            key=lambda color: (-quantized_usage[color], color),
+        )
+        if len(missing_colors) > len(free_indices):
+            raise ValueError(
+                f"Static image requires {len(missing_colors)} additional palette colors, "
+                f"but only {len(free_indices)} unused entries are available"
+            )
+        for index, color in zip(free_indices, missing_colors):
+            palette[index] = color
+            struct.pack_into("<H", palette_data, index * 2, quantized_value[color])
     exact_palette_indices: dict[tuple[int, int, int], list[int]] = {}
     for palette_index in range(color_limit):
         exact_palette_indices.setdefault(palette[palette_index], []).append(palette_index)
@@ -864,13 +895,15 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
         original_index = original_indices[position]
         if original_index < color_limit and pixel == palette[original_index]:
             index = original_index
-        elif (allow_global_exact_palette
-              and len(exact_palette_indices.get(pixel, ())) == 1):
-            # If this RGB color exists at exactly one palette index, there is
-            # no competing animated/duplicate role to preserve.  Honor the
-            # exact palette color even when translated artwork moves it into
-            # a neighbouring sprite region (for example a multicolour logo).
-            index = exact_palette_indices[pixel][0]
+        elif allow_global_exact_palette and exact_palette_indices.get(pixel):
+            # Static artwork may move colors anywhere in the atlas. Duplicate
+            # indices with the same RGB are visually interchangeable here, so
+            # retain every exact source color and merely prefer the most-used
+            # original index for stable tile packing.
+            index = max(
+                exact_palette_indices[pixel],
+                key=lambda candidate: (palette_usage[candidate], -candidate),
+            )
         elif (
             (pixel[0] - key_color[0]) ** 2
             + (pixel[1] - key_color[1]) ** 2
@@ -887,7 +920,10 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
             y, x = divmod(position, layout.width)
             region = (y // band_height, x // region_width)
             cache_key = (*region, pixel)
-            candidates, role_usage = region_roles[region]
+            if allow_global_exact_palette:
+                candidates, role_usage = usable_indices, palette_usage
+            else:
+                candidates, role_usage = region_roles[region]
             index = min(candidates, key=lambda candidate: (
                 (pixel[0] - palette[candidate][0]) ** 2
                 + (pixel[1] - palette[candidate][1]) ** 2
@@ -925,7 +961,7 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
     header = bytearray(layout.header)
     struct.pack_into("<H", header, 10, len(tiles))
     result = bytearray(header)
-    result.extend(layout.palette_data)
+    result.extend(palette_data)
     result.extend(struct.pack(f"<{len(tile_map)}H", *tile_map))
     result.extend(b"".join(tiles))
     output_decompressed_size = len(result)

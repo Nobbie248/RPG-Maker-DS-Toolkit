@@ -364,6 +364,24 @@ class CHBGPaletteMappingTests(unittest.TestCase):
         )
         self.assertEqual(palette_index_at(result.data, 68, 4), 2)
 
+    def test_static_logo_can_reuse_duplicate_exact_rgb_across_regions(self) -> None:
+        palette = [0] * 256
+        palette[0] = 0x03E0
+        palette[1] = 0x7C00
+        palette[2] = 0x001F
+        palette[9] = 0x001F
+        original = make_chbg(
+            [1] * 16,
+            [uniform_tile(0), uniform_tile(1), uniform_tile(2), uniform_tile(9)],
+            palette_values=tuple(palette),
+        )
+        target = decode_chbg(original, False)
+        target.putpixel((68, 4), (255, 0, 0))
+        result = prepare_chbg_replacement(
+            target, original, False, allow_global_exact_palette=True,
+        )
+        self.assertEqual(decode_chbg(result.data, False).getpixel((68, 4)), (255, 0, 0))
+
     def test_off_palette_color_stays_in_local_animated_role(self) -> None:
         # A nearly-blue source color in the green role is still encoded with
         # the green role. Resting RGB distance is secondary to keeping every
