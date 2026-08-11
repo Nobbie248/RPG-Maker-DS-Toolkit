@@ -654,6 +654,7 @@ class TranslatorApp(tk.Tk):
             original = bytes(self.rom.files[self.current_image.file_id])
             prepared = prepare_chbg_replacement(
                 image.convert("RGBA"), original, self.current_image.compressed,
+                self.current_image.name.lower() == "wifi/castle-logo.bin",
             )
             normalized = decode_chbg(prepared.data, self.current_image.compressed)
             output = io.BytesIO()

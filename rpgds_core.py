@@ -719,7 +719,8 @@ def _fit_chbg_tiles(layout: CHBGLayout, desired_tiles: list[bytes],
 
 
 def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
-                             compressed: bool | None = None) -> CHBGEncodeResult:
+                             compressed: bool | None = None,
+                             allow_global_exact_palette: bool = False) -> CHBGEncodeResult:
     layout = parse_chbg(original_raw, compressed)
     if image.size != (layout.width, layout.height):
         raise ValueError(f"Image must remain {layout.width}x{layout.height} pixels")
@@ -792,6 +793,9 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
         )
 
     palette_usage = Counter(original_indices)
+    exact_palette_indices: dict[tuple[int, int, int], list[int]] = {}
+    for palette_index in range(color_limit):
+        exact_palette_indices.setdefault(palette[palette_index], []).append(palette_index)
     # Duplicate RGB values in this format are not interchangeable: one white
     # may belong to scenery while an identical white is part of the menu
     # palette that the game recolors on selection. Restrict edited pixels to
@@ -860,6 +864,13 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
         original_index = original_indices[position]
         if original_index < color_limit and pixel == palette[original_index]:
             index = original_index
+        elif (allow_global_exact_palette
+              and len(exact_palette_indices.get(pixel, ())) == 1):
+            # If this RGB color exists at exactly one palette index, there is
+            # no competing animated/duplicate role to preserve.  Honor the
+            # exact palette color even when translated artwork moves it into
+            # a neighbouring sprite region (for example a multicolour logo).
+            index = exact_palette_indices[pixel][0]
         elif (
             (pixel[0] - key_color[0]) ** 2
             + (pixel[1] - key_color[1]) ** 2
@@ -933,8 +944,12 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
     )
 
 
-def encode_chbg(image: Image.Image, original_raw: bytes, compressed: bool | None = None) -> bytes:
-    return prepare_chbg_replacement(image, original_raw, compressed).data
+def encode_chbg(image: Image.Image, original_raw: bytes,
+                compressed: bool | None = None,
+                allow_global_exact_palette: bool = False) -> bytes:
+    return prepare_chbg_replacement(
+        image, original_raw, compressed, allow_global_exact_palette,
+    ).data
 
 
 def export_png(raw: bytes, name: str, destination: Path) -> None:
@@ -1572,7 +1587,10 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
         with Image.open(io.BytesIO(png_data)) as source_image:
             image = sanitize_import_image(source_image)
         try:
-            encoded = encode_chbg(image, original, name.lower().endswith(".blz"))
+            encoded = encode_chbg(
+                image, original, name.lower().endswith(".blz"),
+                name.lower() == "wifi/castle-logo.bin",
+            )
         except ValueError as exc:
             raise ValueError(f"Image replacement {name}: {exc}") from exc
         rom.setFileByName(name, encoded)
