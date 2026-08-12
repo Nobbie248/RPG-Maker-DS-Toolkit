@@ -1,2 +1,7 @@
 *.nds
 .venv/
+/*.bin
+__pycache__/
+build/
+*.spec
+dont_commit/

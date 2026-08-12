@@ -22,10 +22,13 @@ from rpgds_core import (
     TextEntry,
     auto_translate_entries,
     compile_rom,
+    decode_bmbg,
     decode_chbg,
+    encode_bmbg,
     extract_text_entries,
     list_image_assets,
     load_project,
+    parse_chbg,
     prepare_chbg_replacement,
     profile_for_rom,
     quick_translation,
@@ -579,6 +582,18 @@ class TranslatorApp(tk.Tk):
             changed = " *" if asset.name in self.image_pngs else ""
             self.image_list.insert(tk.END, asset.name + changed)
 
+    def _asset_palette(self, asset: ImageAsset):
+        if asset.palette_file_id is None or not self.rom:
+            return None
+        raw = bytes(self.rom.files[asset.palette_file_id])
+        name = self.rom.filenames.filenameOf(asset.palette_file_id)
+        return parse_chbg(raw, name.lower().endswith(".blz")).palette
+
+    def _decode_asset(self, asset: ImageAsset, raw: bytes):
+        if asset.kind == "BMBG":
+            return decode_bmbg(raw, asset.compressed, self._asset_palette(asset))
+        return decode_chbg(raw, asset.compressed)
+
     def _image_selected(self, _event=None) -> None:
         selection = self.image_list.curselection()
         if not selection or not self.rom:
@@ -591,11 +606,12 @@ class TranslatorApp(tk.Tk):
                     image = sanitize_import_image(source_image).convert("RGB")
                 changed = " · replacement loaded"
             else:
-                image = decode_chbg(bytes(self.rom.files[asset.file_id]), asset.compressed)
+                image = self._decode_asset(asset, bytes(self.rom.files[asset.file_id]))
                 changed = ""
             self.preview_image = image
-            self.image_info.set(f"{asset.name} · {asset.width}×{asset.height} · {asset.bpp}bpp · "
-                                f"{asset.colors} palette colors · {asset.tile_count} tiles · "
+            storage = f"{asset.tile_count} tiles" if asset.kind == "CHBG" else "linear bitmap"
+            self.image_info.set(f"{asset.name} · {asset.kind} · {asset.width}×{asset.height} · {asset.bpp}bpp · "
+                                f"{asset.colors} palette colors · {storage} · "
                                 f"{asset.decompressed_size:,} decoded bytes{changed}")
             self._draw_preview()
         except Exception as exc:
@@ -629,8 +645,8 @@ class TranslatorApp(tk.Tk):
                 self.image_pngs[self.current_image.name],
             ))
         else:
-            decode_chbg(bytes(self.rom.files[self.current_image.file_id]),
-                        self.current_image.compressed).save(path, "PNG")
+            self._decode_asset(self.current_image,
+                               bytes(self.rom.files[self.current_image.file_id])).save(path, "PNG")
         self.status_var.set(f"Exported {Path(path).name}")
 
     def import_image(self) -> None:
@@ -652,6 +668,29 @@ class TranslatorApp(tk.Tk):
                 raise ValueError(f"Replacement must be exactly {self.current_image.width}×"
                                  f"{self.current_image.height} pixels.")
             original = bytes(self.rom.files[self.current_image.file_id])
+            if self.current_image.kind == "BMBG":
+                encoded = encode_bmbg(image, original, self.current_image.compressed,
+                                       self._asset_palette(self.current_image))
+                normalized = decode_bmbg(encoded, self.current_image.compressed,
+                                          self._asset_palette(self.current_image))
+                output = io.BytesIO()
+                normalized.convert("RGB").save(output, "PNG", optimize=True, compress_level=9)
+                self.image_pngs[self.current_image.name] = output.getvalue()
+                self.preview_image = normalized
+                self.refresh_images()
+                self._draw_preview()
+                self.image_info.set(
+                    f"{self.current_image.name} · BMBG · {self.current_image.width}×"
+                    f"{self.current_image.height} · {self.current_image.bpp}bpp · "
+                    f"{self.current_image.colors} palette colors · fixed "
+                    f"{self.current_image.decompressed_size:,} decoded bytes"
+                )
+                self.status_var.set(
+                    f"Imported BMBG safely at its original fixed decoded size: "
+                    f"{self.current_image.decompressed_size:,} bytes"
+                )
+                self.append_log(f"Imported {self.current_image.name} as a fixed-size BMBG bitmap.")
+                return
             prepared = prepare_chbg_replacement(
                 image.convert("RGBA"), original, self.current_image.compressed,
                 self.current_image.name.lower() == "wifi/castle-logo.bin",
@@ -706,8 +745,9 @@ class TranslatorApp(tk.Tk):
         if not self.current_image or not self.rom:
             return
         self.image_pngs.pop(self.current_image.name, None)
-        self.preview_image = decode_chbg(bytes(self.rom.files[self.current_image.file_id]),
-                                        self.current_image.compressed)
+        self.preview_image = self._decode_asset(
+            self.current_image, bytes(self.rom.files[self.current_image.file_id]),
+        )
         self.refresh_images()
         self._draw_preview()
 

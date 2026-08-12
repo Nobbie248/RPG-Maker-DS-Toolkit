@@ -296,6 +296,8 @@ class ImageAsset:
     tile_count: int
     decompressed_size: int
     compressed: bool
+    kind: str = "CHBG"
+    palette_file_id: int | None = None
 
 
 @dataclass
@@ -311,6 +313,19 @@ class CHBGLayout:
     tile_data: bytes
     compressed: bool
     palette_data: bytes
+
+
+@dataclass
+class BMBGLayout:
+    header: bytes
+    width: int
+    height: int
+    bpp: int
+    colors: int
+    palette: list[tuple[int, int, int]]
+    palette_data: bytes
+    pixels: bytes
+    compressed: bool
 
 
 @dataclass(frozen=True)
@@ -503,18 +518,129 @@ def list_image_assets(rom: ndspy.rom.NintendoDSRom) -> list[ImageAsset]:
     assets: list[ImageAsset] = []
     for file_id, raw in enumerate(rom.files):
         data = bytes(raw)
-        if not data.startswith(b"CHBG"):
-            continue
         name = rom.filenames.filenameOf(file_id)
-        layout = parse_chbg(data, name.lower().endswith(".blz"))
-        decompressed_size = (
-            16 + layout.colors * 2 + len(layout.tile_map) * 2
-            + layout.tile_count * layout.bpp * 8
-        )
-        assets.append(ImageAsset(file_id, name, layout.width, layout.height, layout.bpp,
-                                 layout.colors, layout.tile_count, decompressed_size,
-                                 layout.compressed))
+        if not name:
+            continue
+        compressed = name.lower().endswith(".blz")
+        if data.startswith(b"CHBG"):
+            layout = parse_chbg(data, compressed)
+            decompressed_size = (
+                16 + layout.colors * 2 + len(layout.tile_map) * 2
+                + layout.tile_count * layout.bpp * 8
+            )
+            assets.append(ImageAsset(file_id, name, layout.width, layout.height, layout.bpp,
+                                     layout.colors, layout.tile_count, decompressed_size,
+                                     layout.compressed))
+        elif data.startswith(b"BMBG"):
+            # BMBG is a linear indexed bitmap. Most files carry their palette;
+            # edit/ep*.blz deliberately share edit/edit-part.blz's 256 colors.
+            palette_file_id = None
+            decompressed = ndspy.codeCompression.decompress(data) if compressed else data
+            if len(decompressed) < 10:
+                continue
+            fmt = struct.unpack_from("<H", decompressed, 8)[0]
+            colors = (fmt >> 8) * 16
+            if not colors and name.startswith("edit/"):
+                try:
+                    palette_file_id = rom.filenames.idOf("edit/edit-part.blz")
+                    colors = 256
+                except Exception:
+                    continue
+            try:
+                layout = parse_bmbg(data, compressed, _palette_for_file(rom, palette_file_id))
+            except ValueError:
+                # Some BMBG-family containers hold animation/layout records
+                # rather than one linear bitmap. Keep those hidden until their
+                # separate record format is decoded; never guess their sizes.
+                continue
+            assets.append(ImageAsset(file_id, name, layout.width, layout.height, layout.bpp,
+                                     colors, 0, len(decompressed), compressed,
+                                     "BMBG", palette_file_id))
     return assets
+
+
+def _palette_for_file(rom: ndspy.rom.NintendoDSRom,
+                      file_id: int | None) -> list[tuple[int, int, int]] | None:
+    if file_id is None:
+        return None
+    source = bytes(rom.files[file_id])
+    name = rom.filenames.filenameOf(file_id)
+    return parse_chbg(source, name.lower().endswith(".blz")).palette
+
+
+def parse_bmbg(raw: bytes, compressed: bool | None = None,
+               external_palette: list[tuple[int, int, int]] | None = None) -> BMBGLayout:
+    if not raw.startswith(b"BMBG"):
+        raise ValueError("Not a BMBG bitmap")
+    if compressed is None:
+        decompressed = ndspy.codeCompression.decompress(raw)
+        compressed = decompressed != raw
+    elif compressed:
+        decompressed = ndspy.codeCompression.decompress(raw)
+    else:
+        decompressed = raw
+    if len(decompressed) < 16:
+        raise ValueError("Truncated BMBG header")
+    width, height, fmt = struct.unpack_from("<3H", decompressed, 4)
+    bpp = fmt & 0xFF
+    embedded_colors = (fmt >> 8) * 16
+    if bpp not in (4, 8):
+        raise ValueError(f"Unsupported BMBG format 0x{fmt:04X}")
+    palette_size = embedded_colors * 2
+    pixel_size = width * height * bpp // 8
+    expected = 16 + palette_size + pixel_size
+    if len(decompressed) != expected:
+        raise ValueError(f"BMBG size mismatch: expected {expected}, got {len(decompressed)}")
+    palette_data = decompressed[16:16 + palette_size]
+    if embedded_colors:
+        values = struct.unpack(f"<{embedded_colors}H", palette_data)
+        palette = [_bgr555_to_rgb(value) for value in values]
+    elif external_palette:
+        palette = list(external_palette)
+    else:
+        raise ValueError("BMBG uses an external palette that could not be located")
+    return BMBGLayout(decompressed[:16], width, height, bpp, len(palette), palette,
+                      palette_data, decompressed[16 + palette_size:], bool(compressed))
+
+
+def decode_bmbg(raw: bytes, compressed: bool | None = None,
+                 external_palette: list[tuple[int, int, int]] | None = None) -> Image.Image:
+    layout = parse_bmbg(raw, compressed, external_palette)
+    indices = bytearray()
+    if layout.bpp == 4:
+        for value in layout.pixels:
+            indices.extend((value & 0xF, value >> 4))
+    else:
+        indices.extend(layout.pixels)
+    image = Image.new("RGB", (layout.width, layout.height))
+    image.putdata([layout.palette[index] for index in indices])
+    return image
+
+
+def encode_bmbg(image: Image.Image, original_raw: bytes,
+                 compressed: bool | None = None,
+                 external_palette: list[tuple[int, int, int]] | None = None) -> bytes:
+    layout = parse_bmbg(original_raw, compressed, external_palette)
+    image = sanitize_import_image(image).convert("RGB")
+    if image.size != (layout.width, layout.height):
+        raise ValueError(f"Replacement must be exactly {layout.width}x{layout.height} pixels")
+    cache: dict[tuple[int, int, int], int] = {}
+    indices = bytearray()
+    for pixel in image.getdata():
+        if pixel not in cache:
+            cache[pixel] = min(range(len(layout.palette)), key=lambda i: (
+                sum((pixel[c] - layout.palette[i][c]) ** 2 for c in range(3)), i
+            ))
+        index = cache[pixel]
+        if layout.bpp == 4 and index >= 16:
+            raise ValueError("A 4bpp BMBG pixel cannot be represented by its 16-color palette")
+        indices.append(index)
+    if layout.bpp == 4:
+        packed = bytes(indices[i] | (indices[i + 1] << 4) for i in range(0, len(indices), 2))
+    else:
+        packed = bytes(indices)
+    result = layout.header + layout.palette_data + packed
+    return ndspy.codeCompression.compress(result, False) if layout.compressed else result
 
 
 def _bgr555_to_rgb(value: int) -> tuple[int, int, int]:
@@ -1623,10 +1749,19 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
         with Image.open(io.BytesIO(png_data)) as source_image:
             image = sanitize_import_image(source_image)
         try:
-            encoded = encode_chbg(
-                image, original, name.lower().endswith(".blz"),
-                name.lower() == "wifi/castle-logo.bin",
-            )
+            compressed = name.lower().endswith(".blz")
+            if original.startswith(b"BMBG"):
+                palette = None
+                decompressed = ndspy.codeCompression.decompress(original) if compressed else original
+                fmt = struct.unpack_from("<H", decompressed, 8)[0]
+                if not (fmt >> 8) and name.startswith("edit/"):
+                    palette = parse_chbg(bytes(rom.getFileByName("edit/edit-part.blz")), True).palette
+                encoded = encode_bmbg(image, original, compressed, palette)
+            else:
+                encoded = encode_chbg(
+                    image, original, compressed,
+                    name.lower() == "wifi/castle-logo.bin",
+                )
         except ValueError as exc:
             raise ValueError(f"Image replacement {name}: {exc}") from exc
         rom.setFileByName(name, encoded)

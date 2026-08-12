@@ -45,13 +45,17 @@ modified dump, or damaged file should not be used.
 3. Use **Quick Auto** to apply the built-in interface glossary.
 4. Optionally use **Auto Translate + Shorten (Online)** for untranslated text.
 5. Review the results in the **Text** tab and correct them in game context.
-6. Use the **Images** tab to export, edit, and re-import graphical assets.
+6. Use the **Images** tab to export, edit, and re-import graphical assets. It exposes
+   tiled `CHBG` atlases and fixed-size `BMBG` bitmaps such as `edit/ep67.blz`.
 7. Select **Save Project** to preserve the translation work.
 8. Select **Compile ROM** to create a separate test ROM.
 
 The online translator uses Google Translate's public web endpoint. It requires
 internet access and may change or become unavailable. Automatically translated
 text should always be reviewed before a public release.
+
+Imported `BMBG` replacements retain their original dimensions, bit depth,
+palette relationship, and decoded byte size.
 
 ## Project file contents
 

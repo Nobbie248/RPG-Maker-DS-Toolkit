@@ -40,4 +40,24 @@ foreach ($LegacyName in $LegacyNames) {
     }
 }
 
+# PyInstaller's work tree and generated spec are disposable. Keep only the
+# single replacement executable in dist so repeated builds do not clutter the
+# repository.
+$GeneratedSpec = Join-Path $ProjectRoot "$AppName.spec"
+$GeneratedBuild = Join-Path $ProjectRoot "build"
+if (Test-Path -LiteralPath $GeneratedSpec) {
+    Remove-Item -LiteralPath $GeneratedSpec -Force
+}
+if (Test-Path -LiteralPath $GeneratedBuild) {
+    Remove-Item -LiteralPath $GeneratedBuild -Recurse -Force
+}
+foreach ($CachePath in @(
+    (Join-Path $ProjectRoot "__pycache__"),
+    (Join-Path $ProjectRoot "tests\__pycache__")
+)) {
+    if (Test-Path -LiteralPath $CachePath) {
+        Remove-Item -LiteralPath $CachePath -Recurse -Force
+    }
+}
+
 Write-Host "Built: $BuiltExe"
