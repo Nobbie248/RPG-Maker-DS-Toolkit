@@ -21,6 +21,7 @@ from rpgds_audio import (
     _swav_loop_start_samples,
     _decode_swav,
     _private_sdat,
+    _sequence_data_for_render,
     midi_to_sequence,
     midi_loop_ticks,
     midi_tick_to_time,
@@ -103,6 +104,10 @@ class AudioConversionTests(unittest.TestCase):
                         return_value=private) as constructor:
             self.assertIs(_private_sdat(loaded), private)
         constructor.assert_called_once_with(b"original SDAT bytes")
+
+    def test_preview_uses_preserved_sequence_bytes_after_loop_analysis(self):
+        sequence = SimpleNamespace(_rpgds_source_data=b"untouched SSEQ")
+        self.assertEqual(_sequence_data_for_render(sequence), b"untouched SSEQ")
 
     def test_project_round_trips_swav_replacement(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -72,6 +72,12 @@ def _private_sdat(sdat):
     return ndspy.soundArchive.SDAT(data)
 
 
+def _sequence_data_for_render(sequence) -> bytes:
+    """Return preserved sequence bytes without re-saving a parsed branch graph."""
+    source_data = getattr(sequence, "_rpgds_source_data", None)
+    return bytes(source_data) if source_data is not None else bytes(sequence.save()[0])
+
+
 @dataclass(frozen=True)
 class AudioAsset:
     kind: str
@@ -898,7 +904,7 @@ def render_sequence_ncsf_pcm(sdat, asset: AudioAsset, sequence=None,
     # resolves the same SBNK and SWARs as the game does.
     render_index = 0 if asset.kind == "se" else asset.index
     original_name, original = archive.sequences[render_index]
-    raw_sequence = bytes(sequence.save()[0])
+    raw_sequence = _sequence_data_for_render(sequence)
     replacement = ndspy.soundSequence.SSEQ(
         raw_sequence, getattr(sequence, "unk02", 0), sequence.bankID,
         sequence.volume, sequence.channelPressure, sequence.polyphonicPressure,

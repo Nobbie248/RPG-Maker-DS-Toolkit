@@ -32,6 +32,7 @@ from rpgds_core import (
     encode_bmbg,
     embedded_project_from_slot,
     extract_text_entries,
+    image_asset_chbg,
     list_image_assets,
     load_project,
     load_project_audio,
@@ -110,6 +111,40 @@ def _legacy_settings_path() -> Path:
     return root / "RPGDS Translator" / "settings.json"
 
 
+
+IMAGE_CATEGORIES = (
+    "All", "Characters", "Monsters", "Items", "Parts",
+    "Backgrounds", "Title", "Effects", "Interface", "Misc",
+)
+
+
+def image_asset_category(name: str) -> str:
+    """Group NitroFS artwork by its in-game purpose, not storage format."""
+    path = name.removesuffix("::texture").lower()
+    top = path.split("/", 1)[0]
+    if top == "monster":
+        return "Monsters"
+    if top in {"face", "chibitsuku"} or path.startswith("play/chara/"):
+        return "Characters"
+    if top == "item":
+        return "Items"
+    if top in {"town", "dungeon", "room"}:
+        return "Parts"
+    if top == "field" and path != "field/menu-old.bin":
+        return "Parts"
+    if top == "event" and ("::texture" in name.lower() or "event-obj" in path):
+        return "Parts"
+    if top in {"effect", "fukidashi"}:
+        return "Effects"
+    if path.startswith("title/bg") or path in {"map/dungeon-bg.bin", "play/gameover.bin"}:
+        return "Backgrounds"
+    if top in {"title", "topmenu"}:
+        return "Title"
+    if top in {"edit", "common", "wifi", "map", "sample"} or path == "field/menu-old.bin":
+        return "Interface"
+    return "Misc"
+
+
 class TranslatorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -134,6 +169,7 @@ class TranslatorApp(tk.Tk):
         self.filtered_entries: list[TextEntry] = []
         self.images: list[ImageAsset] = []
         self.filtered_images: list[ImageAsset] = []
+        self.image_category = "All"
         self.image_pngs: dict[str, bytes] = {}
         self.audio_replacements: dict[str, bytes] = {}
         self.sample_replacements: dict[str, bytes] = {}
@@ -595,6 +631,15 @@ class TranslatorApp(tk.Tk):
             "Preview, export, replace, and validate ROM artwork without losing palette behavior.",
             UI_BLUE,
         )
+        self.image_category_tabs = ttk.Notebook(self.image_tab, height=1)
+        self.image_category_pages: dict[str, ttk.Frame] = {}
+        for category in IMAGE_CATEGORIES:
+            page = ttk.Frame(self.image_category_tabs, height=1, style="Toolkit.TFrame")
+            self.image_category_pages[category] = page
+            self.image_category_tabs.add(page, text=category)
+        self.image_category_tabs.pack(fill=tk.X, padx=20, pady=(0, 8))
+        self.image_category_tabs.bind("<<NotebookTabChanged>>", self._image_category_changed)
+
         pane = ttk.Panedwindow(self.image_tab, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 18))
         left = ttk.Frame(pane, padding=10, style="Toolkit.TFrame")
@@ -602,7 +647,8 @@ class TranslatorApp(tk.Tk):
         pane.add(left, weight=1)
         pane.add(right, weight=3)
 
-        ttk.Label(left, text="Filter assets:").pack(anchor=tk.W)
+        self.image_filter_label = ttk.Label(left, text="Filter All assets:")
+        self.image_filter_label.pack(anchor=tk.W)
         self.image_filter = tk.StringVar()
         ttk.Entry(left, textvariable=self.image_filter).pack(fill=tk.X, pady=(3, 6))
         self.image_filter.trace_add("write", lambda *_: self.refresh_images())
@@ -829,14 +875,25 @@ class TranslatorApp(tk.Tk):
     def _selected_audio_sequence(self):
         if not self.current_audio or not self.sdat:
             raise ValueError("Select an audio track first")
-        original = sequence_for_asset(self.sdat, self.current_audio)
+        # Work from a fresh private SDAT so loop analysis never parses the
+        # archive object used elsewhere by the UI.  Preserve the raw sequence
+        # before parsing because a few retail SSEQ branches target commands
+        # inside raw blocks that ndspy cannot re-save by object identity.
+        source_data = getattr(self.sdat, "_rpgds_source_data", None)
+        source_archive = (ndspy.soundArchive.SDAT(bytes(source_data))
+                          if source_data is not None else self.sdat)
+        original = sequence_for_asset(source_archive, self.current_audio)
         replacement = self.audio_replacements.get(self.current_audio.key)
         if replacement:
-            return ndspy.soundSequence.SSEQ(
+            sequence = ndspy.soundSequence.SSEQ(
                 replacement, getattr(original, "unk02", 0), original.bankID,
                 original.volume, original.channelPressure,
                 original.polyphonicPressure, original.playerID,
             )
+            sequence._rpgds_source_data = bytes(replacement)
+            return sequence
+        raw = bytes(original.save()[0])
+        original._rpgds_source_data = raw
         return original
 
     def preview_audio(self) -> None:
@@ -1703,11 +1760,29 @@ class TranslatorApp(tk.Tk):
 
     def refresh_images(self) -> None:
         query = self.image_filter.get().casefold().strip() if hasattr(self, "image_filter") else ""
-        self.filtered_images = [asset for asset in self.images if not query or query in asset.name.casefold()]
+        category = getattr(self, "image_category", "All")
+        self.filtered_images = [
+            asset for asset in self.images
+            if (category == "All" or image_asset_category(asset.name) == category)
+            and (not query or query in asset.name.casefold())
+        ]
         self.image_list.delete(0, tk.END)
         for asset in self.filtered_images:
             changed = " *" if asset.name in self.image_pngs else ""
             self.image_list.insert(tk.END, asset.name + changed)
+        if hasattr(self, "image_filter_label"):
+            self.image_filter_label.configure(
+                text=f"Filter {category} assets ({len(self.filtered_images)} shown):"
+            )
+
+    def _image_category_changed(self, _event=None) -> None:
+        if not hasattr(self, "image_category_tabs"):
+            return
+        selected = self.image_category_tabs.select()
+        if not selected:
+            return
+        self.image_category = self.image_category_tabs.tab(selected, "text")
+        self.refresh_images()
 
     def _asset_palette(self, asset: ImageAsset):
         if asset.palette_file_id is None or not self.rom:
@@ -1719,7 +1794,8 @@ class TranslatorApp(tk.Tk):
     def _decode_asset(self, asset: ImageAsset, raw: bytes):
         if asset.kind == "BMBG":
             return decode_bmbg(raw, asset.compressed, self._asset_palette(asset))
-        return decode_chbg(raw, asset.compressed)
+        source = image_asset_chbg(raw, asset)
+        return decode_chbg(source, False if asset.kind == "TXET" else asset.compressed)
 
     def _image_selected(self, _event=None) -> None:
         selection = self.image_list.curselection()
@@ -1731,7 +1807,8 @@ class TranslatorApp(tk.Tk):
             if asset.name in self.image_pngs:
                 with Image.open(io.BytesIO(self.image_pngs[asset.name])) as source_image:
                     replacement = sanitize_import_image(source_image)
-                original = bytes(self.rom.files[asset.file_id])
+                original_file = bytes(self.rom.files[asset.file_id])
+                original = image_asset_chbg(original_file, asset)
                 if asset.kind == "BMBG":
                     encoded = encode_bmbg(
                         replacement, original, asset.compressed, self._asset_palette(asset),
@@ -1741,16 +1818,25 @@ class TranslatorApp(tk.Tk):
                     )
                 else:
                     prepared = prepare_chbg_replacement(
-                        replacement.convert("RGBA"), original, asset.compressed,
+                        replacement.convert("RGBA"), original,
+                        False if asset.kind == "TXET" else asset.compressed,
                         asset.name.lower() == "wifi/castle-logo.bin",
+                        0 if asset.kind == "TXET" else CHBG_SIZE_ALLOWANCE_PERCENT,
                     )
-                    image = decode_chbg(prepared.data, asset.compressed)
+                    image = decode_chbg(
+                        prepared.data, False if asset.kind == "TXET" else asset.compressed,
+                    )
                 changed = " · replacement loaded"
             else:
                 image = self._decode_asset(asset, bytes(self.rom.files[asset.file_id]))
                 changed = ""
             self.preview_image = image
-            storage = f"{asset.tile_count} tiles" if asset.kind == "CHBG" else "linear bitmap"
+            storage = (
+                f"{asset.tile_count} tiles in embedded atlas"
+                if asset.kind == "TXET"
+                else f"{asset.tile_count} tiles" if asset.kind == "CHBG"
+                else "linear bitmap"
+            )
             self.image_info.set(f"{asset.name} · {asset.kind} · {asset.width}×{asset.height} · {asset.bpp}bpp · "
                                 f"{asset.colors} palette colors · {storage} · "
                                 f"{asset.decompressed_size:,} decoded bytes{changed}")
@@ -1809,7 +1895,8 @@ class TranslatorApp(tk.Tk):
             if image.size != (self.current_image.width, self.current_image.height):
                 raise ValueError(f"Replacement must be exactly {self.current_image.width}×"
                                  f"{self.current_image.height} pixels.")
-            original = bytes(self.rom.files[self.current_image.file_id])
+            original_file = bytes(self.rom.files[self.current_image.file_id])
+            original = image_asset_chbg(original_file, self.current_image)
             if self.current_image.kind == "BMBG":
                 encoded = encode_bmbg(image, original, self.current_image.compressed,
                                        self._asset_palette(self.current_image))
@@ -1832,10 +1919,15 @@ class TranslatorApp(tk.Tk):
                 self.append_log(f"Imported {self.current_image.name} as a fixed-size BMBG bitmap.")
                 return
             prepared = prepare_chbg_replacement(
-                image.convert("RGBA"), original, self.current_image.compressed,
+                image.convert("RGBA"), original,
+                False if self.current_image.kind == "TXET" else self.current_image.compressed,
                 self.current_image.name.lower() == "wifi/castle-logo.bin",
+                0 if self.current_image.kind == "TXET" else CHBG_SIZE_ALLOWANCE_PERCENT,
             )
-            normalized = decode_chbg(prepared.data, self.current_image.compressed)
+            normalized = decode_chbg(
+                prepared.data,
+                False if self.current_image.kind == "TXET" else self.current_image.compressed,
+            )
             # Keep the sanitized source pixels in the project. The encoded
             # preview is palette-normalized for the DS, but retaining the
             # source prevents repeated imports from permanently discarding
@@ -1853,9 +1945,9 @@ class TranslatorApp(tk.Tk):
                 if metadata_removed
                 else "; metadata-free source pixels retained in the project"
             )
+            allowance = 0 if self.current_image.kind == "TXET" else CHBG_SIZE_ALLOWANCE_PERCENT
             maximum_decoded = (
-                prepared.original_decompressed_size
-                * (100 + CHBG_SIZE_ALLOWANCE_PERCENT) // 100
+                prepared.original_decompressed_size * (100 + allowance) // 100
             )
             self.image_info.set(
                 f"{self.current_image.name} · {self.current_image.width}×{self.current_image.height} · "
@@ -1872,7 +1964,7 @@ class TranslatorApp(tk.Tk):
                 f"{prepared.output_decompressed_size:,} decoded bytes "
                 f"(original {prepared.original_tiles} tiles / "
                 f"{prepared.original_decompressed_size:,} bytes; "
-                f"hard limit +{CHBG_SIZE_ALLOWANCE_PERCENT}% = {maximum_decoded:,} bytes)"
+                f"hard limit +{allowance}% = {maximum_decoded:,} bytes)"
                 f"{palette_note}{cleanup_note}."
             )
         except Exception as exc:

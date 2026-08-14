@@ -672,6 +672,17 @@ class ImageAsset:
     palette_file_id: int | None = None
 
 
+@dataclass(frozen=True)
+class EmbeddedTextureInfo:
+    """Location of one CHBG atlas inside a DAEH/TXET asset container."""
+
+    decoded_container: bytes
+    chbg_offset: int
+    chbg_size: int
+    wrapper: str
+    segment_sizes: tuple[int, ...] = ()
+
+
 @dataclass
 class CHBGLayout:
     header: bytes
@@ -886,6 +897,137 @@ def extract_text_entries(rom: ndspy.rom.NintendoDSRom) -> list[TextEntry]:
     ]
 
 
+EMBEDDED_TEXTURE_SUFFIX = "::texture"
+
+
+def _chbg_decoded_size(data: bytes) -> int:
+    if len(data) < 16 or not data.startswith(b"CHBG"):
+        raise ValueError("Not a CHBG image")
+    width, height, fmt, tile_count = struct.unpack_from("<4H", data, 4)
+    bpp = fmt & 0xFF
+    colors = (fmt >> 8) * 16
+    if bpp not in (4, 8) or not colors or width % 8 or height % 8:
+        raise ValueError("Invalid embedded CHBG header")
+    return 16 + colors * 2 + (width // 8) * (height // 8) * 2 + tile_count * bpp * 8
+
+
+def _decode_dbz(raw: bytes) -> tuple[bytes, tuple[int, ...]]:
+    if len(raw) < 4 or raw[:3] != b"DBZ":
+        raise ValueError("Not a segmented DBZ container")
+    count = raw[3]
+    table_end = 4 + count * 2
+    if not count or len(raw) < table_end:
+        raise ValueError("Truncated DBZ segment table")
+    compressed_sizes = struct.unpack_from(f"<{count}H", raw, 4)
+    cursor = table_end
+    decoded_parts: list[bytes] = []
+    decoded_sizes: list[int] = []
+    for stored_size in compressed_sizes:
+        end = cursor + stored_size
+        if not stored_size or end > len(raw):
+            raise ValueError("Invalid DBZ segment length")
+        decoded = ndspy.codeCompression.decompress(raw[cursor:end])
+        decoded_parts.append(decoded)
+        decoded_sizes.append(len(decoded))
+        cursor = end
+    if cursor != len(raw):
+        raise ValueError("Unexpected bytes after DBZ segments")
+    return b"".join(decoded_parts), tuple(decoded_sizes)
+
+
+def _encode_dbz(decoded: bytes, segment_sizes: tuple[int, ...]) -> bytes:
+    if sum(segment_sizes) != len(decoded):
+        raise ValueError("Embedded texture changed the DBZ decoded allocation")
+    parts: list[bytes] = []
+    cursor = 0
+    for decoded_size in segment_sizes:
+        part = ndspy.codeCompression.compress(decoded[cursor:cursor + decoded_size], False)
+        if len(part) > 0xFFFF:
+            raise ValueError("Rebuilt DBZ segment exceeds its 16-bit stored-size limit")
+        parts.append(part)
+        cursor += decoded_size
+    return (b"DBZ" + bytes((len(parts),))
+            + struct.pack(f"<{len(parts)}H", *(len(part) for part in parts))
+            + b"".join(parts))
+
+
+def embedded_texture_info(raw: bytes) -> EmbeddedTextureInfo | None:
+    """Find the first TXET-contained CHBG without interpreting map geometry."""
+    candidates: list[tuple[bytes, str, tuple[int, ...]]] = []
+    if raw.startswith(b"DBZ"):
+        try:
+            decoded, segment_sizes = _decode_dbz(raw)
+        except ValueError:
+            return None
+        candidates.append((decoded, "DBZ", segment_sizes))
+    else:
+        if raw.startswith(b"DAEH"):
+            candidates.append((raw, "RAW", ()))
+        try:
+            decompressed = ndspy.codeCompression.decompress(raw)
+        except Exception:
+            decompressed = raw
+        # BLZ leaves an uncompressed prefix, so compressed DAEH files can also
+        # begin with DAEH. Try both representations and accept the one whose
+        # complete chunk stream contains a valid TXET image.
+        if decompressed != raw and decompressed.startswith(b"DAEH"):
+            candidates.append((decompressed, "BLZ", ()))
+
+    for decoded, wrapper, segment_sizes in candidates:
+        cursor = 0
+        while cursor + 8 <= len(decoded):
+            tag = decoded[cursor:cursor + 4]
+            chunk_size = struct.unpack_from("<I", decoded, cursor + 4)[0]
+            if chunk_size < 8 or cursor + chunk_size > len(decoded):
+                break
+            if tag == b"TXET":
+                payload_start = cursor + 8
+                relative = decoded[
+                    payload_start:min(cursor + chunk_size, payload_start + 32)
+                ].find(b"CHBG")
+                if relative >= 0:
+                    chbg_offset = payload_start + relative
+                    try:
+                        chbg_size = _chbg_decoded_size(decoded[chbg_offset:])
+                        parse_chbg(decoded[chbg_offset:chbg_offset + chbg_size], False)
+                    except ValueError:
+                        break
+                    if chbg_offset + chbg_size <= cursor + chunk_size:
+                        return EmbeddedTextureInfo(
+                            decoded, chbg_offset, chbg_size, wrapper, segment_sizes,
+                        )
+            cursor += chunk_size
+    return None
+
+
+def image_asset_chbg(raw: bytes, asset: ImageAsset) -> bytes:
+    if asset.kind != "TXET":
+        return raw
+    info = embedded_texture_info(raw)
+    if info is None:
+        raise ValueError(f"Embedded texture container is no longer valid: {asset.name}")
+    return info.decoded_container[info.chbg_offset:info.chbg_offset + info.chbg_size]
+
+
+def rebuild_embedded_texture(original_raw: bytes, encoded_chbg: bytes) -> bytes:
+    info = embedded_texture_info(original_raw)
+    if info is None:
+        raise ValueError("Not a supported embedded texture container")
+    decoded_chbg = ndspy.codeCompression.decompress(encoded_chbg)
+    if len(decoded_chbg) != info.chbg_size:
+        raise ValueError(
+            "Embedded atlases must keep their original decoded allocation "
+            f"({len(decoded_chbg):,}/{info.chbg_size:,} bytes). Simplify repeated 8x8 tiles."
+        )
+    rebuilt = (info.decoded_container[:info.chbg_offset] + decoded_chbg
+               + info.decoded_container[info.chbg_offset + info.chbg_size:])
+    if info.wrapper == "DBZ":
+        return _encode_dbz(rebuilt, info.segment_sizes)
+    if info.wrapper == "BLZ":
+        return ndspy.codeCompression.compress(rebuilt, False)
+    return rebuilt
+
+
 def list_image_assets(rom: ndspy.rom.NintendoDSRom) -> list[ImageAsset]:
     assets: list[ImageAsset] = []
     for file_id, raw in enumerate(rom.files):
@@ -928,6 +1070,17 @@ def list_image_assets(rom: ndspy.rom.NintendoDSRom) -> list[ImageAsset]:
             assets.append(ImageAsset(file_id, name, layout.width, layout.height, layout.bpp,
                                      colors, 0, len(decompressed), compressed,
                                      "BMBG", palette_file_id))
+        else:
+            info = embedded_texture_info(data)
+            if info is None:
+                continue
+            chbg = info.decoded_container[info.chbg_offset:info.chbg_offset + info.chbg_size]
+            layout = parse_chbg(chbg, False)
+            assets.append(ImageAsset(
+                file_id, name + EMBEDDED_TEXTURE_SUFFIX,
+                layout.width, layout.height, layout.bpp, layout.colors,
+                layout.tile_count, info.chbg_size, info.wrapper != "RAW", "TXET",
+            ))
     return assets
 
 
@@ -1218,7 +1371,8 @@ def _fit_chbg_tiles(layout: CHBGLayout, desired_tiles: list[bytes],
 
 def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
                              compressed: bool | None = None,
-                             allow_global_exact_palette: bool = False) -> CHBGEncodeResult:
+                             allow_global_exact_palette: bool = False,
+                             size_allowance_percent: int = CHBG_SIZE_ALLOWANCE_PERCENT) -> CHBGEncodeResult:
     layout = parse_chbg(original_raw, compressed)
     if image.size != (layout.width, layout.height):
         raise ValueError(f"Image must remain {layout.width}x{layout.height} pixels")
@@ -1272,7 +1426,7 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
     fixed_bytes = 16 + layout.colors * 2 + len(layout.tile_map) * 2
     original_decompressed_size = fixed_bytes + layout.tile_count * tile_bytes
     maximum_decompressed_size = (
-        original_decompressed_size * (100 + CHBG_SIZE_ALLOWANCE_PERCENT) // 100
+        original_decompressed_size * (100 + size_allowance_percent) // 100
     )
     capacity_tiles = min(
         0xFFFF,
@@ -2167,13 +2321,18 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
         _set_embedded_project_file(rom, embedded_project.data)
     text_count = apply_entries(rom, entries)
     image_count = 0
+    image_assets = {asset.name: asset for asset in list_image_assets(rom)}
     for name, png_data in image_pngs.items():
-        original = bytes(rom.getFileByName(name))
+        asset = image_assets.get(name)
+        if asset is None:
+            raise ValueError(f"Image replacement is not available in this ROM: {name}")
+        original_file = bytes(rom.files[asset.file_id])
+        original = image_asset_chbg(original_file, asset)
         with Image.open(io.BytesIO(png_data)) as source_image:
             image = sanitize_import_image(source_image)
         try:
-            compressed = name.lower().endswith(".blz")
-            if original.startswith(b"BMBG"):
+            compressed = asset.compressed
+            if asset.kind == "BMBG":
                 palette = None
                 decompressed = ndspy.codeCompression.decompress(original) if compressed else original
                 fmt = struct.unpack_from("<H", decompressed, 8)[0]
@@ -2181,13 +2340,17 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
                     palette = parse_chbg(bytes(rom.getFileByName("edit/edit-part.blz")), True).palette
                 encoded = encode_bmbg(image, original, compressed, palette)
             else:
-                encoded = encode_chbg(
-                    image, original, compressed,
+                prepared = prepare_chbg_replacement(
+                    image, original, False if asset.kind == "TXET" else compressed,
                     name.lower() == "wifi/castle-logo.bin",
+                    0 if asset.kind == "TXET" else CHBG_SIZE_ALLOWANCE_PERCENT,
                 )
+                encoded = prepared.data
+                if asset.kind == "TXET":
+                    encoded = rebuild_embedded_texture(original_file, encoded)
         except ValueError as exc:
             raise ValueError(f"Image replacement {name}: {exc}") from exc
-        rom.setFileByName(name, encoded)
+        rom.files[asset.file_id] = encoded
         image_count += 1
     if audio_replacements or sample_replacements:
         sdat = ndspy.soundArchive.SDAT(bytes(rom.getFileByName("sound/sound_data.sdat")))
