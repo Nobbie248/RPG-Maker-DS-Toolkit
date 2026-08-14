@@ -161,6 +161,9 @@ class EmbeddedProjectTests(unittest.TestCase):
         self.assertEqual(
             struct.unpack_from("<I", arm9, 0x02072D4C - base)[0], 0xEB00FFB8,
         )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x02011904 - base)[0], 0xEB018CFC,
+        )
         # The selector enters its cleanup/blank display state rather than the
         # visible city-background state.
         self.assertEqual(
@@ -168,6 +171,9 @@ class EmbeddedProjectTests(unittest.TestCase):
         )
         self.assertEqual(
             struct.unpack_from("<I", arm9, 0x020735EC - base)[0], 0xEB000150,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x02073618 - base)[0], 0xEB0005AF,
         )
         self.assertEqual(
             struct.unpack_from("<I", arm9, 0x02073650 - base)[0], 0xEB000597,

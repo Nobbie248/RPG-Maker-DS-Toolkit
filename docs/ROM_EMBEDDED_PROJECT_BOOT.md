@@ -166,6 +166,14 @@ flashing project-selection artwork between brightness restoration and the
 embedded project's first real frame. Normal translation builds and the source
 ROM retain the original assets.
 
+The selector also owns fade and UI layers that can overwrite master brightness
+after those assets load. A direct-boot-only guard is therefore enabled around
+the original synchronous selector/loader call. The normal per-frame graphics
+update still runs, but the guard reapplies full hardware black to both display
+engines every frame. It is cleared only after that loader returns and immediately
+before the original embedded-game handoff. This masks backgrounds, sprites, text,
+and every other selector layer rather than relying on individual image files.
+
 For development, a boot override such as holding **Select** should bypass direct
 boot and show the normal title/editor interface. This prevents a bad embedded
 project from making the ROM impossible to inspect.

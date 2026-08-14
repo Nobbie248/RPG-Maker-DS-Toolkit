@@ -60,6 +60,7 @@ DS_PLUS_DIRECT_BOOT_OVERLAY = 9
 DS_PLUS_DIRECT_BOOT_CODE_ADDRESS = 0x020B2BA4
 DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS = 0x020B2C34
 DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_ADDRESS = 0x02074C94
+DS_PLUS_DIRECT_BOOT_GUARD_FLAG_ADDRESS = 0x02074D30
 DS_PLUS_DIRECT_BOOT_CAVE_SHA256 = (
     "2fb9af6adccc92e3de1426007c770feaf7d4b04e82a63f6f9b0c1e7e69516484"
 )
@@ -88,11 +89,23 @@ DS_PLUS_DIRECT_BOOT_TRAMPOLINE = bytes.fromhex(
 # normal brightness and tail-calls the original game startup handoff,
 # preserving its return address and r0 argument.
 DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_SHA256 = (
-    "6a7230e8e86537dd577c9c894b7a7b2a4724abdb627c8f2ab3f03c392adacf11"
+    "6ab551d71ab99780ad5acf948f7a23010ca9e8af34a0de01cae683f969b1b116"
 )
 DS_PLUS_DIRECT_BOOT_HEADLESS_CODE = bytes.fromhex(
+    # 0x02074C94: force both display engines to full black.
     "14109fe50229a0e3102082e2b020c1e1011a81e2b020c1e11eff2fe16c000004"
-    "10109fe50020a0e3b020c1e1011a81e2b020c1e1071900ea6c000004"
+    # 0x02074CB4: clear the guard, restore both engines, and tail-call
+    # the original embedded-game handoff.
+    "18109fe50020a0e3002081e510109fe5b020c1e1011a81e2b020c1e1051900ea"
+    "304d07026c000004"
+    # 0x02074CDC: set the guard before entering the synchronous project
+    # selector/loader, then tail-call its original routine.
+    "01402de910009fe50110a0e3001080e5e8ffffeb0140bde84c81ffea304d0702"
+    # 0x02074CFC: run the normal per-frame graphics update, then force both
+    # engines black again while the loader guard remains set.
+    "10402de9b96dfeeb0c409fe5000094e5000050e3dfffff1b1080bde8304d0702"
+    # Five unreachable NOPs followed by the zero-initialized guard word.
+    "00f020e300f020e300f020e300f020e300f020e300000000"
 )
 
 # (RAM address, expected clean instruction, replacement instruction).
@@ -104,9 +117,13 @@ DS_PLUS_DIRECT_BOOT_HEADLESS_CODE = bytes.fromhex(
 # proven initialization/deserialization code runs behind the hardware mask.
 DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
     (0x02072D4C, 0xEB0007D0, 0),  # title-sequence call -> direct branch
+    # Reapply black after selector fades/layers try to reveal either screen.
+    (0x02011904, 0xEBFFFAB8, 0xEB018CFC),
     # Enter the selector's cleanup/blank state instead of its visible state 2.
     # This removes the already-prepared city backdrop before deserialization.
     (0x020735E8, 0xE3A01002, 0xE3A01004),  # mov r1, #4 (blank/cleanup)
+    # Set the guard immediately before the original synchronous project loader.
+    (0x02073618, 0xEBFF8703, 0xEB0005AF),
     # Restore both screens only at the handoff into the embedded game. The
     # helper tail-calls the original target, so normal startup continues.
     (0x02073650, 0xEB001EA5, 0xEB000597),
