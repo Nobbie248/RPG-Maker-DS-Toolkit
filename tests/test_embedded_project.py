@@ -17,11 +17,15 @@ from rpgds_core import (
     EmbeddedProject,
     DS_PLUS_DIRECT_BOOT_CODE,
     DS_PLUS_DIRECT_BOOT_CODE_ADDRESS,
+    DS_PLUS_DIRECT_BOOT_BACKDROP_PATH,
+    DS_PLUS_DIRECT_BOOT_HEADLESS_CODE,
+    DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_ADDRESS,
     DS_PLUS_DIRECT_BOOT_TRAMPOLINE,
     DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS,
     DS_PLUS_DIRECT_BOOT_OVERLAY,
     _set_embedded_project_file,
     apply_ds_plus_direct_boot,
+    decode_chbg,
     embedded_project_from_slot,
     load_project,
     save_project,
@@ -134,7 +138,15 @@ class EmbeddedProjectTests(unittest.TestCase):
         slot = valid_slot(b"DIRECT BOOT")
         _set_embedded_project_file(rom, slot)
 
+        original_backdrop = bytes(rom.getFileByName(DS_PLUS_DIRECT_BOOT_BACKDROP_PATH))
+
         apply_ds_plus_direct_boot(rom)
+
+        black_backdrop = bytes(rom.getFileByName(DS_PLUS_DIRECT_BOOT_BACKDROP_PATH))
+        self.assertEqual(len(black_backdrop), len(original_backdrop))
+        self.assertEqual(black_backdrop[:16], original_backdrop[:16])
+        black_image = decode_chbg(black_backdrop, compressed=False)
+        self.assertEqual(black_image.getbbox(), None)
 
         arm9 = ndspy.codeCompression.decompress(bytes(rom.arm9))
         base = rom.arm9RamAddress
@@ -144,6 +156,17 @@ class EmbeddedProjectTests(unittest.TestCase):
         self.assertEqual(
             struct.unpack_from("<I", arm9, 0x02072D4C - base)[0], 0xEB00FFB8,
         )
+        # The selector enters its cleanup/blank display state rather than the
+        # visible city-background state.
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x020735E8 - base)[0], 0xE3A01004,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x020735EC - base)[0], 0xEB000150,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x02073650 - base)[0], 0xEB000597,
+        )
         for address, clean_word in (
             (0x0207435C, 0xEBFEB620),
             (0x02074D70, 0xEBFE60D4),
@@ -152,16 +175,16 @@ class EmbeddedProjectTests(unittest.TestCase):
             (0x02075338, 0xEBFE5F62),
         ):
             self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], clean_word)
-        # The data portion of the selector constructor runs, but it returns
-        # before the first graphics object is allocated.
-        for address, patched_word in (
-            (0x02054D7C, 0xE3A00000),
-            (0x02054D80, 0xE58A0010),
-            (0x02054D84, 0xE58A0014),
-            (0x02054D88, 0xE28DD014),
-            (0x02054D8C, 0xE8BD8FF0),
+        # The complete original selector constructor remains intact because it
+        # also initializes loader state; the hardware black mask hides it.
+        for address, clean_word in (
+            (0x02054D7C, 0xEBFEDE80),
+            (0x02054D80, 0xE3500000),
+            (0x02054D84, 0x0A000000),
+            (0x02054D88, 0xEBFEF648),
+            (0x02054D8C, 0xE3A01001),
         ):
-            self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], patched_word)
+            self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], clean_word)
         for address, patched_word in (
             (0x02055238, 0xE3A05000),
             (0x0205523C, 0xE3A06000),
@@ -191,6 +214,13 @@ class EmbeddedProjectTests(unittest.TestCase):
                 trampoline_offset:trampoline_offset + len(DS_PLUS_DIRECT_BOOT_TRAMPOLINE)
             ]),
             DS_PLUS_DIRECT_BOOT_TRAMPOLINE,
+        )
+        headless_offset = DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_ADDRESS - base
+        self.assertEqual(
+            bytes(arm9[
+                headless_offset:headless_offset + len(DS_PLUS_DIRECT_BOOT_HEADLESS_CODE)
+            ]),
+            DS_PLUS_DIRECT_BOOT_HEADLESS_CODE,
         )
         self.assertEqual(overlay.ramSize, 0x57FC0)
         self.assertEqual(bytes(rom.getFileByName("embedded/project-slot.bin")), slot)

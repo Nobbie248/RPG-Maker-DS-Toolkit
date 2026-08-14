@@ -21,10 +21,12 @@ Two changes are required:
 
 The tested boot's first application screen is the embedded game's own first
 notice. The publisher logo, game title, main menu, and project-selection screen
-are not displayed. The selector constructor initializes its nonvisual fields
-but returns before allocating its background, tile layers, or sprites. It then
-enters the internal activation path to deserialize the database, initial party,
-and maps. No controller input is synthesized.
+are not displayed. The original selector constructor and activation path still
+run because they initialize and deserialize the database, initial party, and
+maps. No controller input is synthesized. Both DS master-brightness registers
+are held at full black while this proven loader runs and are restored only at
+the original handoff into the embedded game's startup. The mask/restore helpers
+replace part of the now-unreachable title-menu routine.
 
 Merely adding a file to NitroFS is not enough: the original executable reads
 projects from cartridge save memory, so a small ARM9 boot/storage patch is also
@@ -153,6 +155,15 @@ Do not patch the reset vector to jump straight into gameplay. The game must firs
 initialize NitroFS, save hardware, heaps, graphics, overlays, and global project
 state. The patch should run after the normal title initialization and call or
 branch into the same handler used by **Play Game**, with slot 1 already selected.
+
+The implemented direct-boot path keeps both DS screens hardware-black while the
+original project loader performs that initialization. The loader's otherwise
+unavoidable city/menu backdrop (`topmenu/top1.bin`) is replaced only in the
+compiled direct-boot ROM by an opaque black CHBG with the exact original header,
+dimensions, bit depth, tile count, tile map, and decoded byte size. This prevents
+the project-selection artwork from flashing between brightness restoration and
+the embedded project's first real frame. Normal translation builds and the
+source ROM retain the original asset.
 
 For development, a boot override such as holding **Select** should bypass direct
 boot and show the normal title/editor interface. This prevents a bad embedded

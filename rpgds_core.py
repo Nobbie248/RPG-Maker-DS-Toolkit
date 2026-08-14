@@ -45,6 +45,7 @@ DS_PLUS_PROJECT_INTEGRITY_WORD = 0x99814001
 DESMUME_SAVE_FOOTER_MAGIC = b"|-DESMUME SAVE-|"
 EMBEDDED_PROJECT_ROM_PATH = "embedded/project-slot.bin"
 EMBEDDED_PROJECT_MEMBER = "embedded/project-slot.bin"
+DS_PLUS_DIRECT_BOOT_BACKDROP_PATH = "topmenu/top1.bin"
 
 # DS+ direct-boot patch.  The injected routine replaces unused C++ exception
 # diagnostic strings in ARM9 (logic_error/length_error); no executable code,
@@ -55,6 +56,7 @@ EMBEDDED_PROJECT_MEMBER = "embedded/project-slot.bin"
 DS_PLUS_DIRECT_BOOT_OVERLAY = 9
 DS_PLUS_DIRECT_BOOT_CODE_ADDRESS = 0x020B2BA4
 DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS = 0x020B2C34
+DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_ADDRESS = 0x02074C94
 DS_PLUS_DIRECT_BOOT_CAVE_SHA256 = (
     "2fb9af6adccc92e3de1426007c770feaf7d4b04e82a63f6f9b0c1e7e69516484"
 )
@@ -71,34 +73,43 @@ DS_PLUS_DIRECT_BOOT_TRAMPOLINE = bytes.fromhex(
     # path is required to deserialize the database, initial party, and maps;
     # its input wait is bypassed separately below without generating input.
     "daffffeb"  # bl  0x020B2BA4      (installer)
+    "1508ffeb"  # bl  0x02074C94      (black both DS screens)
     "0200a0e3"  # mov r0, #2          (Play Game state)
     "10008de5"  # str r0, [sp, #0x10]
-    "6502ffea"  # b   0x020735DC      (project activation path)
-    "0000a0e1"  # nop
-    "0000a0e1"  # nop
+    "6402ffea"  # b   0x020735DC      (project activation path)
+    "00f020e3"  # nop
+)
+
+# These routines replace part of the now-unreachable title-menu function. The
+# first forces both master-brightness registers to black. The second restores
+# normal brightness and tail-calls the original game startup handoff,
+# preserving its return address and r0 argument.
+DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_SHA256 = (
+    "6a7230e8e86537dd577c9c894b7a7b2a4724abdb627c8f2ab3f03c392adacf11"
+)
+DS_PLUS_DIRECT_BOOT_HEADLESS_CODE = bytes.fromhex(
+    "14109fe50229a0e3102082e2b020c1e1011a81e2b020c1e11eff2fe16c000004"
+    "10109fe50020a0e3b020c1e1011a81e2b020c1e1071900ea6c000004"
 )
 
 # (RAM address, expected clean instruction, replacement instruction).
 # This one deliberately narrow patch replaces the top-level call that enters
 # the entire logo/title flow.  The trampoline branches directly into the
 # original Play Game continuation after installing and selecting project slot
-# 1.  The title and menu functions remain byte-identical but become unreachable
-# on this embedded-project boot path.  The project selector initializes only
-# its nonvisual state, then enters its original activation handler without
-# allocating or drawing the picker UI.
+# 1. The title and menu are unreachable on this embedded-project boot path;
+# part of that dead title routine stores the black-mask helpers. The selector's
+# proven initialization/deserialization code runs behind the hardware mask.
 DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
     (0x02072D4C, 0xEB0007D0, 0),  # title-sequence call -> direct branch
-    # The selector constructor has finished initializing every data field at
-    # this point. Return before it allocates the background, tile layers, and
-    # picker sprites; the activation path below does not need those objects.
-    (0x02054D7C, 0xEBFEDE80, 0xE3A00000),  # mov r0, #0
-    (0x02054D80, 0xE3500000, 0xE58A0010),  # str r0, [sl, #0x10]
-    (0x02054D84, 0x0A000000, 0xE58A0014),  # str r0, [sl, #0x14]
-    (0x02054D88, 0xEBFEF648, 0xE28DD014),  # add sp, sp, #0x14
-    (0x02054D8C, 0xE3A01001, 0xE8BD8FF0),  # pop {..., pc}
+    # Enter the selector's cleanup/blank state instead of its visible state 2.
+    # This removes the already-prepared city backdrop before deserialization.
+    (0x020735E8, 0xE3A01002, 0xE3A01004),  # mov r1, #4 (blank/cleanup)
+    # Restore both screens only at the handoff into the embedded game. The
+    # helper tail-calls the original target, so normal startup continues.
+    (0x02073650, 0xEB001EA5, 0xEB000597),
     # Immediately after the selector function's prologue, choose the first
-    # slot and enter its ordinary acceptance path.  Branching here prevents
-    # the picker graphics, frame update, and input loop from ever being made.
+    # slot and enter its ordinary acceptance path. Branching here bypasses the
+    # picker frame update and input loop; its initialization stays intact.
     (0x02055238, 0xE59A1004, 0xE3A05000),  # mov r5, #0
     (0x0205523C, 0xE3A05000, 0xE3A06000),  # mov r6, #0
     (0x02055240, 0xE3510000, 0xE3A07000),  # mov r7, #0
@@ -383,6 +394,27 @@ def _patch_instruction(data: bytearray, ram_address: int, address: int,
     struct.pack_into("<I", data, offset, replacement)
 
 
+def _blacken_direct_boot_backdrop(raw: bytes) -> bytes:
+    """Make a CHBG fully opaque black without changing its layout or size.
+
+    Palette index zero is often treated as transparent by the DS renderer, so
+    index one is made black and every stored tile pixel is changed to index
+    one.  The header, tile map, tile count, dimensions, bit depth, and total
+    decoded size remain exactly the same as the source asset.
+    """
+    layout = parse_chbg(raw, compressed=False)
+    if layout.bpp not in (4, 8) or layout.colors < 2:
+        raise ValueError("Direct-boot backdrop needs a CHBG palette index 1")
+
+    result = bytearray(raw)
+    struct.pack_into("<H", result, 16 + 2, 0)  # palette index 1 = BGR555 black
+    map_size = (layout.width // 8) * (layout.height // 8) * 2
+    tile_offset = 16 + layout.colors * 2 + map_size
+    fill = 0x11 if layout.bpp == 4 else 0x01
+    result[tile_offset:] = bytes([fill]) * (len(result) - tile_offset)
+    return bytes(result)
+
+
 def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
     """Install the verified DS+ embedded-project seed patch.
 
@@ -400,6 +432,18 @@ def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
     embedded_id = rom.filenames.idOf(EMBEDDED_PROJECT_ROM_PATH)
     if embedded_id is None or len(rom.files[embedded_id]) != DS_PLUS_PROJECT_SLOT_SIZE:
         raise ValueError("Direct boot requires a validated embedded project-slot file")
+
+    # The original activation routine briefly exposes its city/menu backdrop
+    # after master brightness is restored and before the project's first frame
+    # is drawn. It is required loader code and cannot safely be skipped. Mask
+    # only that unreachable direct-boot backdrop with an exact-layout black
+    # CHBG so no project-picker frame can flash on screen.
+    backdrop_id = rom.filenames.idOf(DS_PLUS_DIRECT_BOOT_BACKDROP_PATH)
+    if backdrop_id is None:
+        raise ValueError("Direct-boot backdrop asset is missing from the DS+ ROM")
+    rom.files[backdrop_id] = _blacken_direct_boot_backdrop(
+        bytes(rom.files[backdrop_id])
+    )
 
     arm9 = bytearray(ndspy.codeCompression.decompress(bytes(rom.arm9)))
     for address, expected, replacement in DS_PLUS_DIRECT_BOOT_ARM9_PATCHES:
@@ -425,6 +469,17 @@ def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
     trampoline_offset = DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS - rom.arm9RamAddress
     arm9[trampoline_offset:trampoline_offset + len(DS_PLUS_DIRECT_BOOT_TRAMPOLINE)] = (
         DS_PLUS_DIRECT_BOOT_TRAMPOLINE
+    )
+    headless_offset = DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_ADDRESS - rom.arm9RamAddress
+    original_headless = bytes(
+        arm9[headless_offset:headless_offset + len(DS_PLUS_DIRECT_BOOT_HEADLESS_CODE)]
+    )
+    if hashlib.sha256(original_headless).hexdigest() != DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_SHA256:
+        raise ValueError(
+            "Direct-boot selector graphics region does not match the verified DS+ build"
+        )
+    arm9[headless_offset:headless_offset + len(DS_PLUS_DIRECT_BOOT_HEADLESS_CODE)] = (
+        DS_PLUS_DIRECT_BOOT_HEADLESS_CODE
     )
     rom.arm9 = _compress_arm9(bytes(arm9), rom.arm9RamAddress)
 
