@@ -546,8 +546,9 @@ class TranslatorApp(tk.Tk):
                 APP_NAME,
                 "The project slot is now attached to this translation session.\n\n"
                 "Use Save Project to store it in the .rpgdsproj file. Compiling will add the "
-                "slot to the ROM as embedded/project-slot.bin. Direct cold boot will be added "
-                "in the next implementation stage.",
+                "slot to the ROM and install it into an empty save slot 1 on cold boot. "
+                "An existing valid slot 1 is never overwritten. Automatic entry into Play "
+                "Game is still under development.",
             )
 
     def refresh_texts(self) -> None:
@@ -953,7 +954,7 @@ class TranslatorApp(tk.Tk):
                             f"{image_count} image replacements. Rebuilt ROM parsed successfully."
                             + (
                                 f"\nEmbedded created-game slot {self.embedded_project.source_slot} "
-                                f"as {EMBEDDED_PROJECT_ROM_PATH}."
+                                f"as {EMBEDDED_PROJECT_ROM_PATH}; cold-boot installer enabled."
                                 if self.embedded_project else ""
                             ))
             self.tabs.select(self.log_tab)

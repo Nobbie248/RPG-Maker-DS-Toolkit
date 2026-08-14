@@ -56,9 +56,11 @@ For DS+, **Embed Project from Save** reads the four created-game slots from a
 raw `.sav` or DeSmuME `.dsv`. Only populated slots with matching redundant
 safety copies and valid integrity markers can be selected. Save the translation
 project afterward to preserve the embedded slot. Compilation adds it to NitroFS
-as `embedded/project-slot.bin`. Automatic cold-boot loading is a separate,
-not-yet-enabled executable patch; attaching the slot alone does not change the
-normal title-screen boot flow.
+as `embedded/project-slot.bin` and enables a verified cold-boot installer. On a
+blank save, the ROM copies that data into project slot 1 using the game's native
+save routines and rescans it; an existing valid slot 1 is never overwritten.
+Automatic entry into **Play Game** is still under development, so the installed
+project currently needs to be launched from the title menu normally.
 
 The online translator uses Google Translate's public web endpoint. It requires
 internet access and may change or become unavailable. Automatically translated

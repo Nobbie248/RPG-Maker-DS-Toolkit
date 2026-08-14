@@ -5,6 +5,9 @@ import unittest
 import zipfile
 from pathlib import Path
 
+import ndspy.codeCompression
+import ndspy.rom
+
 from rpgds_core import (
     DESMUME_SAVE_FOOTER_MAGIC,
     DS_PLUS_PROJECT_COPY_SIZE,
@@ -12,6 +15,11 @@ from rpgds_core import (
     DS_PLUS_PROJECT_SLOT_SIZE,
     DS_PLUS_SAVE_PAYLOAD_SIZE,
     EmbeddedProject,
+    DS_PLUS_DIRECT_BOOT_CODE,
+    DS_PLUS_DIRECT_BOOT_CODE_ADDRESS,
+    DS_PLUS_DIRECT_BOOT_OVERLAY,
+    _set_embedded_project_file,
+    apply_ds_plus_direct_boot,
     embedded_project_from_slot,
     load_project,
     save_project,
@@ -113,6 +121,46 @@ class EmbeddedProjectTests(unittest.TestCase):
             _source, _rows, _images, embedded = load_project(project_path)
 
             self.assertIsNone(embedded)
+
+    def test_direct_boot_patch_is_scoped_and_binary_verified(self):
+        source = Path(__file__).parents[1] / (
+            "5968 - RPG Tsukuru DS+ - Create the New World (DSi Enhanced) (J).nds"
+        )
+        if not source.exists():
+            self.skipTest("clean DS+ regression ROM is not available")
+        rom = ndspy.rom.NintendoDSRom.fromFile(source)
+        slot = valid_slot(b"DIRECT BOOT")
+        _set_embedded_project_file(rom, slot)
+
+        apply_ds_plus_direct_boot(rom)
+
+        arm9 = ndspy.codeCompression.decompress(bytes(rom.arm9))
+        base = rom.arm9RamAddress
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x0207435C - base)[0], 0xEB00FA10,
+        )
+        overlays = rom.loadArm9Overlays()
+        overlay = overlays[DS_PLUS_DIRECT_BOOT_OVERLAY]
+        code_offset = DS_PLUS_DIRECT_BOOT_CODE_ADDRESS - base
+        self.assertEqual(
+            bytes(arm9[code_offset:code_offset + len(DS_PLUS_DIRECT_BOOT_CODE)]),
+            DS_PLUS_DIRECT_BOOT_CODE,
+        )
+        self.assertEqual(overlay.ramSize, 0x57FC0)
+        self.assertEqual(bytes(rom.getFileByName("embedded/project-slot.bin")), slot)
+
+    def test_direct_boot_refuses_double_patching(self):
+        source = Path(__file__).parents[1] / (
+            "5968 - RPG Tsukuru DS+ - Create the New World (DSi Enhanced) (J).nds"
+        )
+        if not source.exists():
+            self.skipTest("clean DS+ regression ROM is not available")
+        rom = ndspy.rom.NintendoDSRom.fromFile(source)
+        _set_embedded_project_file(rom, valid_slot())
+        apply_ds_plus_direct_boot(rom)
+
+        with self.assertRaisesRegex(ValueError, "refusing to patch an unknown ROM"):
+            apply_ds_plus_direct_boot(rom)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,31 @@ DESMUME_SAVE_FOOTER_MAGIC = b"|-DESMUME SAVE-|"
 EMBEDDED_PROJECT_ROM_PATH = "embedded/project-slot.bin"
 EMBEDDED_PROJECT_MEMBER = "embedded/project-slot.bin"
 
+# DS+ direct-boot patch.  The injected routine replaces unused C++ exception
+# diagnostic strings in ARM9 (logic_error/length_error); no executable code,
+# normal UI text, save structure, or game asset is displaced.  It installs the
+# embedded project into an empty slot 1, rescans the save manager, and then
+# calls the original Play Game entry point.
+DS_PLUS_DIRECT_BOOT_OVERLAY = 9
+DS_PLUS_DIRECT_BOOT_CODE_ADDRESS = 0x020B2BA4
+DS_PLUS_DIRECT_BOOT_CAVE_SHA256 = (
+    "ce2f9fd01e9340947ccde68ae72efd0645ac683fdee0df67570f7b3916159c72"
+)
+DS_PLUS_DIRECT_BOOT_CODE = bytes.fromhex(
+    "f0412de90080a0e108d04de20800a0e10abcfdeb0800a0e10010a0e363bcfdeb"
+    "000050e31000001a0000a0e300008de504008de538008fe20d10a0e104208de2"
+    "0130a0e393a5fdeb00109de504209de50000a0e345adfdeb0800a0e1f7bbfdeb"
+    "00109de50000a0e39b66fdeb08d08de2f081bde8656d6265646465642f70726f"
+    "6a6563742d736c6f742e62696e000000"
+)
+
+# (RAM address, expected clean instruction, replacement instruction).
+# Redirect the title's normal save scan through the embedded-project installer.
+DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
+    (0x0207435C, 0xEBFEB620, 0),           # scan save through installer
+)
+DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES = ()
+
 # Verified CP932 prose/UI pools in the decompressed ARM9. Other pointer targets
 # include keyboard layouts, character conversion tables, and ARM instructions
 # that happen to decode as Japanese; treating those as translations corrupts
@@ -295,6 +320,75 @@ def _set_embedded_project_file(rom: ndspy.rom.NintendoDSRom, data: bytes) -> Non
         "embedded",
         ndspy.fnt.Folder(files=["project-slot.bin"], firstID=file_id),
     ))
+
+
+def _arm_bl(source_address: int, target_address: int) -> int:
+    """Encode an unconditional ARM-state BL instruction."""
+    displacement = target_address - (source_address + 8)
+    if displacement & 3:
+        raise ValueError("ARM branch target is not word aligned")
+    word_offset = displacement >> 2
+    if not -(1 << 23) <= word_offset < (1 << 23):
+        raise ValueError("ARM branch target is out of range")
+    return 0xEB000000 | (word_offset & 0x00FFFFFF)
+
+
+def _patch_instruction(data: bytearray, ram_address: int, address: int,
+                       expected: int, replacement: int, region: str) -> None:
+    offset = address - ram_address
+    if offset < 0 or offset + 4 > len(data):
+        raise ValueError(f"Direct-boot patch address {address:#010x} is outside {region}")
+    actual = struct.unpack_from("<I", data, offset)[0]
+    if actual != expected:
+        raise ValueError(
+            f"Direct-boot patch expected {expected:#010x} at {address:#010x} "
+            f"in {region}, found {actual:#010x}; refusing to patch an unknown ROM"
+        )
+    struct.pack_into("<I", data, offset, replacement)
+
+
+def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
+    """Install the verified DS+ embedded-project seed patch.
+
+    ROMs without an embedded project never call this function.  On a patched
+    ROM, the title's normal save scan copies the embedded project to save slot
+    1 only when that slot is not already valid.  The original Japanese save
+    layout and redundant project copies remain unchanged.  Automatic entry
+    into Play Game is deliberately separate from this verified install stage.
+    """
+    if bytes(rom.idCode) != b"VEBJ":
+        raise ValueError("Direct project boot currently supports DS+ (VEBJ) only")
+    embedded_id = rom.filenames.idOf(EMBEDDED_PROJECT_ROM_PATH)
+    if embedded_id is None or len(rom.files[embedded_id]) != DS_PLUS_PROJECT_SLOT_SIZE:
+        raise ValueError("Direct boot requires a validated embedded project-slot file")
+
+    arm9 = bytearray(ndspy.codeCompression.decompress(bytes(rom.arm9)))
+    for address, expected, replacement in DS_PLUS_DIRECT_BOOT_ARM9_PATCHES:
+        if not replacement:
+            replacement = _arm_bl(address, DS_PLUS_DIRECT_BOOT_CODE_ADDRESS)
+        _patch_instruction(
+            arm9, rom.arm9RamAddress, address, expected, replacement, "ARM9",
+        )
+    cave_offset = DS_PLUS_DIRECT_BOOT_CODE_ADDRESS - rom.arm9RamAddress
+    cave = bytes(arm9[cave_offset:cave_offset + len(DS_PLUS_DIRECT_BOOT_CODE)])
+    if hashlib.sha256(cave).hexdigest() != DS_PLUS_DIRECT_BOOT_CAVE_SHA256:
+        raise ValueError(
+            "Direct-boot ARM9 code cave does not match the verified DS+ build"
+        )
+    arm9[cave_offset:cave_offset + len(DS_PLUS_DIRECT_BOOT_CODE)] = (
+        DS_PLUS_DIRECT_BOOT_CODE
+    )
+    rom.arm9 = _compress_arm9(bytes(arm9), rom.arm9RamAddress)
+
+    overlays = rom.loadArm9Overlays()
+    overlay = overlays[DS_PLUS_DIRECT_BOOT_OVERLAY]
+    for address, expected, replacement in DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES:
+        _patch_instruction(
+            overlay.data, overlay.ramAddress, address, expected, replacement,
+            f"overlay {DS_PLUS_DIRECT_BOOT_OVERLAY}",
+        )
+    rom.files[overlay.fileID] = overlay.save(compress=True)
+    rom.arm9OverlayTable = ndspy.code.saveOverlayTable(overlays)
 
 
 def _compress_arm9(data: bytes, ram_address: int) -> bytearray:
@@ -1901,6 +1995,8 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
             raise ValueError(f"Image replacement {name}: {exc}") from exc
         rom.setFileByName(name, encoded)
         image_count += 1
+    if embedded_project is not None:
+        apply_ds_plus_direct_boot(rom)
     rom.saveToFile(output_rom, updateDeviceCapacity=True)
     return text_count, image_count
 
