@@ -71,7 +71,6 @@ class TranslatorApp(tk.Tk):
         self.images: list[ImageAsset] = []
         self.filtered_images: list[ImageAsset] = []
         self.image_pngs: dict[str, bytes] = {}
-        self.embedded_project: EmbeddedProject | None = None
         self.current_image: ImageAsset | None = None
         self.preview_photo: ImageTk.PhotoImage | None = None
         self.worker_queue: queue.Queue = queue.Queue()
@@ -137,7 +136,7 @@ class TranslatorApp(tk.Tk):
         ttk.Button(toolbar, text="Open Project", command=self.open_project).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Save Project", command=self.save_project).pack(side=tk.LEFT, padx=5)
         self.embed_button = ttk.Button(
-            toolbar, text="Embed Project from Save", command=self.embed_project_from_save,
+            toolbar, text="Build Direct-Boot ROM from Save", command=self.embed_project_from_save,
         )
         self.embed_button.pack(side=tk.LEFT, padx=5)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
@@ -329,7 +328,6 @@ class TranslatorApp(tk.Tk):
             self.source_rom = path
             self.project_path = project_path if session_kind == "project" else None
             self.image_pngs = dict(saved_images or {})
-            self.embedded_project = saved_embedded_project
             if saved_rows:
                 for entry in self.entries:
                     row = saved_rows.get(entry.key)
@@ -342,15 +340,17 @@ class TranslatorApp(tk.Tk):
             self.status_var.set(f"Loaded {self.profile.title}: {len(self.entries)} strings, {len(self.images)} images")
             project_label = self.project_path.name if self.project_path else "unsaved ROM session"
             code = bytes(self.rom.idCode).decode("ascii", errors="replace")
-            embedded_label = (
-                f"  |  Embedded game: save slot {self.embedded_project.source_slot}"
-                if self.embedded_project else ""
-            )
             self.session_var.set(f"Current ROM: {path.name}  |  Game: {self.profile.title} [{code}]  |  "
-                                 f"Project: {project_label}{embedded_label}")
+                                 f"Project: {project_label}")
             self.title(f"{APP_NAME} - {self.profile.title} [{code}]")
             self.append_log(f"Opened {path}\nSHA-256: {digest}\nFound {len(self.entries)} text slots and "
                             f"{len(self.images)} CHBG images.")
+            if saved_embedded_project is not None:
+                self.append_log(
+                    "This older project archive contains an embedded game, but it was not "
+                    "attached to the editing session. Use Build Direct-Boot ROM from Save "
+                    "for a one-time standalone build."
+                )
             self._remember_session(session_kind, path, self.project_path)
         self.status_var.set(f"Reading {path.name}...")
         self._run_worker(task, done)
@@ -404,7 +404,7 @@ class TranslatorApp(tk.Tk):
             path = Path(selected)
         try:
             save_project(
-                path, self.source_rom, self.entries, self.image_pngs, self.embedded_project,
+                path, self.source_rom, self.entries, self.image_pngs, None,
             )
             self.project_path = path
             self._remember_session("project", self.source_rom, path)
@@ -412,12 +412,6 @@ class TranslatorApp(tk.Tk):
             self.append_log(f"Saved project to {path}")
         except Exception as exc:
             messagebox.showerror(APP_NAME, str(exc))
-
-    def _refresh_embedded_project_label(self) -> None:
-        base = self.session_var.get().split("  |  Embedded game:", 1)[0]
-        if self.embedded_project:
-            base += f"  |  Embedded game: save slot {self.embedded_project.source_slot}"
-        self.session_var.set(base)
 
     def embed_project_from_save(self) -> None:
         if not self.rom or not self.source_rom:
@@ -459,7 +453,8 @@ class TranslatorApp(tk.Tk):
             text=(
                 f"Save: {save_path.name}\n"
                 "Select a populated project whose two safety copies match. "
-                "The complete slot will be stored in this translation project."
+                "The selected slot will be used for this ROM build only. The currently "
+                "loaded .rpgdsproj file and normal Compile ROM output will not be changed."
             ),
             padding=(12, 12, 12, 8),
             wraplength=740,
@@ -507,50 +502,32 @@ class TranslatorApp(tk.Tk):
             result["project"] = embedded_project_from_slot(slot, save_path.name)
             dialog.destroy()
 
-        def remove_existing() -> None:
-            result["remove"] = True
-            dialog.destroy()
-
         buttons = ttk.Frame(dialog, padding=12)
         buttons.pack(fill=tk.X)
-        remove_button = ttk.Button(
-            buttons, text="Remove Existing Embedded Project", command=remove_existing,
-            state=tk.NORMAL if self.embedded_project else tk.DISABLED,
-        )
-        remove_button.pack(side=tk.LEFT)
         ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
-        embed_button = ttk.Button(buttons, text="Embed Selected Project", command=accept)
+        embed_button = ttk.Button(buttons, text="Compile Selected Project", command=accept)
         embed_button.pack(side=tk.RIGHT)
         tree.bind("<Double-1>", lambda _event: accept())
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         self.wait_window(dialog)
 
-        if result.get("remove"):
-            self.embedded_project = None
-            self._refresh_embedded_project_label()
-            self.status_var.set("Removed embedded project from this translation project.")
-            self.append_log("Removed the embedded created-game project.")
-            return
         project = result.get("project")
         if isinstance(project, EmbeddedProject):
-            self.embedded_project = project
-            self._refresh_embedded_project_label()
-            self.status_var.set(
-                f"Embedded project selected: {save_path.name}, slot {project.source_slot}"
+            output = filedialog.asksaveasfilename(
+                parent=self,
+                title="Compile direct-boot ROM",
+                defaultextension=".nds",
+                initialfile="RPG Tsukuru DS+ Direct Boot.nds",
+                filetypes=(("Nintendo DS ROM", "*.nds"),),
             )
+            if not output:
+                return
             self.append_log(
-                f"Selected {save_path.name} slot {project.source_slot} for ROM embedding.\n"
-                f"Project slot SHA-256: {project.sha256}"
+                f"One-time direct-boot build selected {save_path.name} slot "
+                f"{project.source_slot}.\nProject slot SHA-256: {project.sha256}\n"
+                "The loaded .rpgdsproj was not modified."
             )
-            messagebox.showinfo(
-                APP_NAME,
-                "The project slot is now attached to this translation session.\n\n"
-                "Use Save Project to store it in the .rpgdsproj file. Compiling will add the "
-                "slot to the ROM and install it into an empty save slot 1 on cold boot. "
-                "An existing valid slot 1 is never overwritten. The compiled ROM bypasses "
-                "the game logos, title screen, main menu, and project picker, then launches "
-                "the embedded project through the original Play Game loader.",
-            )
+            self._start_compile(Path(output), project)
 
     def refresh_texts(self) -> None:
         query = self.text_filter.get().casefold().strip() if hasattr(self, "text_filter") else ""
@@ -923,7 +900,22 @@ class TranslatorApp(tk.Tk):
                                               filetypes=(("Nintendo DS ROM", "*.nds"),))
         if not output:
             return
-        output_path = Path(output)
+        self._start_compile(Path(output), None)
+
+    def _start_compile(self, output_path: Path,
+                       embedded_project: EmbeddedProject | None) -> None:
+        """Compile either a normal ROM or a one-time direct-boot ROM.
+
+        The embedded project is an argument owned only by this build job. It is
+        never attached to the editing session or written to the .rpgdsproj.
+        """
+        if not self.source_rom:
+            messagebox.showinfo(APP_NAME, "Open a ROM first.")
+            return
+        invalid = [entry for entry in self.entries if entry.translation and not entry.valid]
+        if invalid:
+            messagebox.showerror(APP_NAME, f"Fix {len(invalid)} invalid translations before compiling.")
+            return
 
         def progress(current, total, status):
             self.worker_queue.put(("progress", current, total, status))
@@ -932,18 +924,18 @@ class TranslatorApp(tk.Tk):
             progress(1, 3, "Applying text and image replacements...")
             result = compile_rom(
                 self.source_rom, output_path, self.entries, self.image_pngs,
-                self.embedded_project,
+                embedded_project,
             )
             progress(2, 3, "Verifying rebuilt ROM...")
             rebuilt = ndspy.rom.NintendoDSRom.fromFile(output_path)
             rebuilt.loadArm9Overlays()
             if bytes(rebuilt.idCode) != self.profile.game_code:
                 raise ValueError("Rebuilt ROM verification failed")
-            if self.embedded_project:
+            if embedded_project:
                 embedded_id = rebuilt.filenames.idOf(EMBEDDED_PROJECT_ROM_PATH)
                 if embedded_id is None:
                     raise ValueError("Rebuilt ROM is missing the embedded project asset")
-                if bytes(rebuilt.files[embedded_id]) != self.embedded_project.data:
+                if bytes(rebuilt.files[embedded_id]) != embedded_project.data:
                     raise ValueError("Rebuilt ROM embedded-project verification failed")
             progress(3, 3, "Compilation complete.")
             return result
@@ -954,14 +946,25 @@ class TranslatorApp(tk.Tk):
             self.append_log(f"Compiled {output_path}\nApplied {text_count} text translations and "
                             f"{image_count} image replacements. Rebuilt ROM parsed successfully."
                             + (
-                                f"\nEmbedded created-game slot {self.embedded_project.source_slot} "
+                                f"\nEmbedded created-game slot {embedded_project.source_slot} "
                                 f"as {EMBEDDED_PROJECT_ROM_PATH}; cold-boot installer enabled."
-                                if self.embedded_project else ""
+                                if embedded_project else ""
                             ))
             self.tabs.select(self.log_tab)
-            messagebox.showinfo(APP_NAME, f"ROM compiled successfully.\n\n{output_path}\n\n"
-                                          f"Text changes: {text_count}\nImage changes: {image_count}")
-        self.status_var.set("Compiling ROM...")
+            mode = "Direct-boot ROM" if embedded_project else "ROM"
+            messagebox.showinfo(
+                APP_NAME,
+                f"{mode} compiled successfully.\n\n{output_path}\n\n"
+                f"Text changes: {text_count}\nImage changes: {image_count}"
+                + (
+                    "\n\nThe loaded .rpgdsproj was not modified."
+                    if embedded_project else ""
+                ),
+            )
+        self.status_var.set(
+            "Compiling one-time direct-boot ROM..."
+            if embedded_project else "Compiling ROM..."
+        )
         self._run_worker(task, done)
 
 

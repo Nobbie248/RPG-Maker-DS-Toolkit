@@ -52,14 +52,16 @@ modified dump, or damaged file should not be used.
 7. Select **Save Project** to preserve the translation work.
 8. Select **Compile ROM** to create a separate test ROM.
 
-For DS+, **Embed Project from Save** reads the four created-game slots from a
-raw `.sav` or DeSmuME `.dsv`. Only populated slots with matching redundant
-safety copies and valid integrity markers can be selected. Save the translation
-project afterward to preserve the embedded slot. Compilation adds it to NitroFS
-as `embedded/project-slot.bin` and enables a verified cold-boot installer. On a
+For DS+, **Build Direct-Boot ROM from Save** reads the four created-game slots
+from a raw `.sav` or DeSmuME `.dsv`. Only populated slots with matching redundant
+safety copies and valid integrity markers can be selected. The selected slot is
+used for that build only: it is not attached to or saved inside the loaded
+`.rpgdsproj`, and the normal **Compile ROM** button continues producing an
+ordinary translation ROM. The one-time build adds the slot to NitroFS as
+`embedded/project-slot.bin` and enables a verified cold-boot installer. On a
 blank save, the ROM copies that data into project slot 1 using the game's native
 save routines and rescans it; an existing valid slot 1 is never overwritten.
-The compiled ROM displays none of the game's boot logos, title screen, main
+The direct-boot ROM displays none of the game's boot logos, title screen, main
 menu, or project picker. It enters the original **Play Game / slot 1** path and
 launches the embedded game automatically from a cold boot.
 
