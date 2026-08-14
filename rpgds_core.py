@@ -135,6 +135,17 @@ DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
     (0x02055240, 0xE3510000, 0xE3A07000),  # mov r7, #0
     (0x02055244, 0xBA000004, 0xE58A7080),  # str r7, [sl, #0x80]
     (0x02055248, 0xE3510002, 0xEA0000D8),  # b 0x020555B0
+    # The hidden selector has no user interaction, so suppress all of its UI
+    # sound-effect dispatches. Embedded-game audio is outside this routine and
+    # remains untouched.
+    (0x020555F0, 0xEBFFD634, 0xE320F000),
+    (0x0205563C, 0xEBFFD621, 0xE320F000),
+    (0x020556E4, 0xEBFFD5F7, 0xE320F000),
+    (0x02055750, 0xEBFFD5DC, 0xE320F000),
+    (0x02055798, 0xEBFFD5CA, 0xE320F000),
+    (0x020557A8, 0xEBFFD5C6, 0xE320F000),
+    (0x02055B48, 0xEBFFD4DE, 0xE320F000),
+    (0x02055C20, 0xEBFFD4A8, 0xE320F000),
 )
 DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES = ()
 

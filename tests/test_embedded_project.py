@@ -204,6 +204,13 @@ class EmbeddedProjectTests(unittest.TestCase):
             (0x02055248, 0xEA0000D8),
         ):
             self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], patched_word)
+        for address in (
+            0x020555F0, 0x0205563C, 0x020556E4, 0x02055750,
+            0x02055798, 0x020557A8, 0x02055B48, 0x02055C20,
+        ):
+            self.assertEqual(
+                struct.unpack_from("<I", arm9, address - base)[0], 0xE320F000,
+            )
         # The former late bypass is gone: the picker input poll remains clean
         # and is unreachable on direct boot.
         self.assertEqual(

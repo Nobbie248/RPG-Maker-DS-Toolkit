@@ -173,6 +173,10 @@ update still runs, but the guard reapplies full hardware black to both display
 engines every frame. It is cleared only after that loader returns and immediately
 before the original embedded-game handoff. This masks backgrounds, sprites, text,
 and every other selector layer rather than relying on individual image files.
+Because this selector is fully automatic and hidden, its eight UI sound-effect
+dispatches are also suppressed in direct-boot builds. This removes the artificial
+confirmation sound without muting or changing any audio used by the embedded
+game itself.
 
 For development, a boot override such as holding **Select** should bypass direct
 boot and show the normal title/editor interface. This prevents a bad embedded
