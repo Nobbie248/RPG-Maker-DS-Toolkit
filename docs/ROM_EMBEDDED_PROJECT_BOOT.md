@@ -20,9 +20,10 @@ Two changes are required:
    into the original **Play Game / slot 1** continuation.
 
 The tested boot's first application screen is the embedded game's own first
-notice. The publisher logo, game title, main menu, and project-selection
-functions are not called; the patch does not fake button presses or shorten
-their input waits.
+notice. The publisher logo, game title, main menu, and project-selection screen
+are not displayed. The selector's internal activation path is still used to
+deserialize the database, initial party, and maps; its input poll is bypassed
+without generating a controller event.
 
 Merely adding a file to NitroFS is not enough: the original executable reads
 projects from cartridge save memory, so a small ARM9 boot/storage patch is also

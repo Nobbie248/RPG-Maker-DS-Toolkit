@@ -138,8 +138,9 @@ class EmbeddedProjectTests(unittest.TestCase):
 
         arm9 = ndspy.codeCompression.decompress(bytes(rom.arm9))
         base = rom.arm9RamAddress
-        # The sole state-machine hook replaces the title-sequence call.  The
-        # old title/menu/picker input loops remain completely unmodified.
+        # The title-sequence call is replaced, while the title and main-menu
+        # input loops remain completely unmodified.  The selector's input poll
+        # alone branches into its original project-activation path.
         self.assertEqual(
             struct.unpack_from("<I", arm9, 0x02072D4C - base)[0], 0xEB00FFB8,
         )
@@ -149,10 +150,14 @@ class EmbeddedProjectTests(unittest.TestCase):
             (0x02074D74, 0xE1A04000),
             (0x02075334, 0xE3E0B000),
             (0x02075338, 0xEBFE5F62),
-            (0x020553A4, 0xE3E09000),
-            (0x020553A8, 0xEBFEDF46),
         ):
             self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], clean_word)
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x020553A4 - base)[0], 0xE1A06007,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x020553A8 - base)[0], 0xEA000080,
+        )
         overlays = rom.loadArm9Overlays()
         overlay = overlays[DS_PLUS_DIRECT_BOOT_OVERLAY]
         code_offset = DS_PLUS_DIRECT_BOOT_CODE_ADDRESS - base

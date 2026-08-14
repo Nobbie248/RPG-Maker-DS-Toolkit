@@ -66,17 +66,16 @@ DS_PLUS_DIRECT_BOOT_CODE = bytes.fromhex(
     "6a6563742d736c6f742e62696e000000"
 )
 DS_PLUS_DIRECT_BOOT_TRAMPOLINE = bytes.fromhex(
-    # Install/rescan the embedded slot, select slot zero through the game's
-    # original project selector state, set the top-level result to Play Game,
-    # and enter the existing game-launch continuation.  This is a state-machine
-    # branch: it never constructs or runs the logo, title, main-menu, or
-    # project-picker states and it does not synthesize controller input.
+    # Install/rescan the embedded slot, set the top-level result to Play Game,
+    # and enter the game's original project activation path.  The activation
+    # path is required to deserialize the database, initial party, and maps;
+    # its input wait is bypassed separately below without generating input.
     "daffffeb"  # bl  0x020B2BA4      (installer)
-    "0000a0e3"  # mov r0, #0          (slot 1 / zero-based index)
-    "2a21ffeb"  # bl  0x0207B0EC      (select project)
     "0200a0e3"  # mov r0, #2          (Play Game state)
     "10008de5"  # str r0, [sp, #0x10]
-    "8102ffea"  # b   0x02073654      (game-launch continuation)
+    "6502ffea"  # b   0x020735DC      (project activation path)
+    "0000a0e1"  # nop
+    "0000a0e1"  # nop
 )
 
 # (RAM address, expected clean instruction, replacement instruction).
@@ -87,6 +86,11 @@ DS_PLUS_DIRECT_BOOT_TRAMPOLINE = bytes.fromhex(
 # unreachable on this embedded-project boot path.
 DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
     (0x02072D4C, 0xEB0007D0, 0),  # title-sequence call -> direct branch
+    # Once the original selector object has prepared slot 1, skip its input
+    # poll and take the ordinary acceptance path.  This is not a key press and
+    # happens before a selector frame can be presented.
+    (0x020553A4, 0xE3E09000, 0xE1A06007),
+    (0x020553A8, 0xEBFEDF46, 0xEA000080),
 )
 DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES = ()
 
@@ -373,8 +377,10 @@ def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
     ROM, the boot-time save scan copies the embedded project to save slot 1
     only when that slot is not already valid, then the top-level state enters
     the original Play Game routine for slot 1.  The main menu and the
-    project-selection screen are not constructed.  The original Japanese save
-    layout and redundant project copies remain unchanged.
+    project-selection screen is never presented; its internal activation path
+    is retained because it loads the project's database, initial party, and
+    maps.  The original Japanese save layout and redundant project copies
+    remain unchanged.
     """
     if bytes(rom.idCode) != b"VEBJ":
         raise ValueError("Direct project boot currently supports DS+ (VEBJ) only")
