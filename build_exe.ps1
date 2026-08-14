@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $WorkspacePython = "C:\Users\Roman\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-$AppName = "RPGDS Translator Build"
+$AppName = "RPG Maker DS Toolkit"
 $DistDir = Join-Path $ProjectRoot "dist"
 $BuiltExe = Join-Path $DistDir "$AppName.exe"
 
@@ -25,6 +25,7 @@ if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed with exit code 
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
 $LegacyNames = @(
+    "RPGDS Translator Build.exe",
     "RPGDS_Translator_Dual.exe",
     "RPGDS_Translator_Dual_SafeImages.exe"
 )

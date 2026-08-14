@@ -1,7 +1,7 @@
-# RPG Maker DS Translator
+# RPG Maker DS Toolkit
 
-English translation project and Windows editing toolkit for the Japanese
-Nintendo DS releases of **RPG Tsukuru DS** and **RPG Tsukuru DS+**.
+An unofficial Windows development, translation, and modding toolkit for the
+Japanese Nintendo DS releases of **RPG Tsukuru DS** and **RPG Tsukuru DS+**.
 
 The current project focuses on **RPG Tsukuru DS+: Create the New World**. It
 translates the editor interface, help text, generated event text, menus, and
@@ -27,7 +27,8 @@ formats.
 - Saves text and replacement artwork together in a portable `.rpgdsproj`
   project archive.
 - Reads RPG Tsukuru DS+ `.sav` and DeSmuME `.dsv` files, validates their four
-  mirrored created-game slots, and attaches one selected project to the archive.
+  mirrored created-game slots, and builds a one-time direct-boot ROM from the
+  selected project without changing the saved toolkit project.
 - Rebuilds a separate test ROM without modifying the clean source ROM.
 
 ## Supported games
@@ -42,7 +43,7 @@ modified dump, or damaged file should not be used.
 
 ## Using the Windows editor
 
-1. Run `dist\RPGDS Translator Build.exe`.
+1. Run `dist\RPG Maker DS Toolkit.exe`.
 2. Select **Open ROM** and choose a supported clean Japanese ROM.
 3. Use **Quick Auto** to apply the built-in interface glossary.
 4. Optionally use **Auto Translate + Shorten (Online)** for untranslated text.
@@ -78,7 +79,6 @@ palette relationship, and decoded byte size.
 
 - every extracted text record and its current English translation;
 - imported replacement PNG artwork;
-- an optional validated DS+ created-game slot selected from a save;
 - the expected source-ROM path and SHA-256; and
 - metadata linking each replacement to its internal ROM asset.
 
@@ -137,7 +137,7 @@ The build script creates a local virtual environment, installs the dependencies,
 and replaces:
 
 ```text
-dist\RPGDS Translator Build.exe
+dist\RPG Maker DS Toolkit.exe
 ```
 
 The command-line `rpgds_text.py` extractor is also available for CSV-based

@@ -1,4 +1,4 @@
-"""Windows GUI for translating and rebuilding RPG Tsukuru DS and DS+."""
+"""Windows toolkit for translating, modifying, and rebuilding RPG Tsukuru DS games."""
 
 from __future__ import annotations
 
@@ -45,10 +45,16 @@ from rpgds_core import (
 )
 
 
-APP_NAME = "RPG Tsukuru DS / DS+ Translator"
+APP_NAME = "RPG Maker DS Toolkit"
 
 
 def _settings_path() -> Path:
+    base = os.environ.get("LOCALAPPDATA")
+    root = Path(base) if base else Path.home() / "AppData" / "Local"
+    return root / "RPG Maker DS Toolkit" / "settings.json"
+
+
+def _legacy_settings_path() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     root = Path(base) if base else Path.home() / "AppData" / "Local"
     return root / "RPGDS Translator" / "settings.json"
@@ -83,11 +89,19 @@ class TranslatorApp(tk.Tk):
         self.after(250, self._auto_load_last_session)
 
     def _read_settings(self) -> dict[str, str]:
-        try:
-            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
-            return {str(key): str(value) for key, value in data.items() if value is not None}
-        except (OSError, ValueError, TypeError):
-            return {}
+        for path in (self.settings_path, _legacy_settings_path()):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                settings = {str(key): str(value) for key, value in data.items() if value is not None}
+                if path != self.settings_path:
+                    self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = self.settings_path.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+                    temporary.replace(self.settings_path)
+                return settings
+            except (OSError, ValueError, TypeError):
+                continue
+        return {}
 
     def _remember_session(self, kind: str, rom_path: Path,
                           project_path: Path | None = None) -> None:
