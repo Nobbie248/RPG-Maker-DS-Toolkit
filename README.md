@@ -58,8 +58,11 @@ modified dump, or damaged file should not be used.
 6. Review the results in the **Text** workspace and correct them in game context.
 7. Use **Graphics** to export, edit, and re-import graphical assets. It exposes
    tiled `CHBG` atlases and fixed-size `BMBG` bitmaps such as `edit/ep67.blz`.
-8. Use **Music / SFX** to preview native tracks, export or import MIDI, assign
-   DS instruments, or extract the complete sound-bank library.
+8. Use **Music / SFX** to preview native tracks, import MIDI with per-track DS
+   instrument/volume and tempo setup, import ordinary WAV files as replacement
+   sound effects, or extract the complete sound-bank library.
+   Music previews loop until **Stop** is pressed, and the MIDI setup dialog can
+   preview the current instrument, volume, and tempo choices before import.
 9. Return to **File** and select **Save Toolkit Project** to preserve
    the translation work.
 10. Open **Compile ROM** to create a separate test ROM.

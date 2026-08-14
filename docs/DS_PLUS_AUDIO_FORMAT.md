@@ -67,9 +67,24 @@ about 0.249 seconds long.
 
 The toolkit converts SSEQ into Standard MIDI for editing. MIDI import converts
 up to 16 tracks back to SSEQ and asks which existing instrument slot in the
-selected track's SBNK each MIDI track should use. MIDI cannot represent every
+selected track's SBNK each MIDI track should use. The import setup also exposes
+per-track volume and the MIDI's detected tempo; changing the tempo overrides
+the MIDI tempo events in the generated SSEQ. MIDI cannot represent every
 Nintendo-specific event, so complex controller behavior and loop boundaries
 may be simplified by a round trip.
+
+The MIDI setup window can render the current choices before committing them.
+Both this preview and normal BGM/BGS/ME playback repeat continuously until the
+user presses **Stop**. Sound-effect previews remain one-shot.
+
+For an SSAR sound effect, **Import WAV** follows the sequence's instrument and
+note to its exact SBNK -> SWAR -> SWAV target. DS+ has one unique sample target
+for each of its 136 effects, so replacement does not change another effect.
+The importer accepts uncompressed 8/16/24/32-bit PCM WAV, mixes it to mono,
+caps the rate at 32,768 Hz, peak-normalizes it, and encodes it as Nintendo DS
+IMA ADPCM. Effects are limited to 15 seconds to avoid unreasonable SDAT and RAM
+growth. Replacement SWAV data is stored inside the toolkit project and applied
+only when previewing or compiling; the original ROM is never modified.
 
 Top-level BGM, BGS and ME preview uses the established **in_ncsf SSEQ Player**
 core rather than the toolkit's original approximate Python synthesizer. The

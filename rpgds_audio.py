@@ -250,7 +250,9 @@ def midi_track_names(midi: mido.MidiFile) -> list[str]:
     return names
 
 
-def midi_to_sequence(midi: mido.MidiFile, instrument_ids: list[int], base_sequence):
+def midi_to_sequence(midi: mido.MidiFile, instrument_ids: list[int], base_sequence,
+                     track_volumes: list[int] | None = None,
+                     tempo_bpm: int | None = None):
     """Convert MIDI tracks to an SSEQ while retaining the selected DS bank."""
     scale = TICKS_PER_BEAT / max(1, midi.ticks_per_beat)
     track_events: list[list] = []
@@ -260,6 +262,12 @@ def midi_to_sequence(midi: mido.MidiFile, instrument_ids: list[int], base_sequen
         timeline: list[tuple[int, object]] = []
         instrument = instrument_ids[track_index] if track_index < len(instrument_ids) else 0
         timeline.append((0, ndspy.soundSequence.InstrumentSwitchSequenceEvent(0, instrument)))
+        if track_volumes is not None and track_index < len(track_volumes):
+            timeline.append((0, ndspy.soundSequence.TrackVolumeSequenceEvent(
+                max(0, min(127, int(track_volumes[track_index]))))))
+        if track_index == 0 and tempo_bpm is not None:
+            timeline.append((0, ndspy.soundSequence.TempoSequenceEvent(
+                max(1, min(1023, int(tempo_bpm))))))
         for message in midi_track:
             absolute += message.time
             tick = max(0, round(absolute * scale))
@@ -271,7 +279,7 @@ def midi_to_sequence(midi: mido.MidiFile, instrument_ids: list[int], base_sequen
                     start, velocity = stack.pop(0)
                     timeline.append((start, ndspy.soundSequence.NoteSequenceEvent(
                         message.note, velocity, max(1, tick - start))))
-            elif message.type == "set_tempo":
+            elif message.type == "set_tempo" and tempo_bpm is None:
                 timeline.append((tick, ndspy.soundSequence.TempoSequenceEvent(
                     max(1, round(mido.tempo2bpm(message.tempo))))))
             elif message.type == "control_change" and message.control == 7:
@@ -357,6 +365,136 @@ def _note_definition(instrument, pitch: int):
                 return region.noteDefinition
         return instrument.regions[-1].noteDefinition if instrument.regions else None
     return None
+
+
+def effect_sample_target(sdat, asset: AudioAsset) -> tuple[int, int]:
+    """Return the single SWAR/SWAV slot used by a DS+ SSAR effect."""
+    if asset.kind != "se":
+        raise ValueError("Select a sound effect before importing a WAV")
+    sequence = sequence_for_asset(sdat, asset)
+    bank = sdat.banks[sequence.bankID][1]
+    programs: dict[int, int] = {}
+    targets: set[tuple[int, int]] = set()
+    for track, _tick, event in _event_tracks(sequence):
+        if isinstance(event, ndspy.soundSequence.InstrumentSwitchSequenceEvent):
+            programs[track] = (int(event.bankID) << 7) | int(event.instrumentID)
+        elif isinstance(event, ndspy.soundSequence.NoteSequenceEvent):
+            program = programs.get(track, 0)
+            if program < 0 or program >= len(bank.instruments):
+                continue
+            instrument = bank.instruments[program]
+            if instrument is None:
+                continue
+            definition = _note_definition(instrument, int(event.type))
+            if definition is None or int(definition.type) != 1:
+                continue
+            if definition.waveArchiveIDID >= len(bank.waveArchiveIDs):
+                continue
+            archive_index = bank.waveArchiveIDs[definition.waveArchiveIDID]
+            targets.add((int(archive_index), int(definition.waveID)))
+    if len(targets) != 1:
+        raise ValueError(
+            f"This effect references {len(targets)} samples; automatic WAV replacement "
+            "requires exactly one sample"
+        )
+    return next(iter(targets))
+
+
+_IMA_STEP_TABLE = (
+    7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,
+    66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,
+    371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,
+    1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,
+    5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,
+    16818,18500,20350,22385,24623,27086,29794,32767,
+)
+_IMA_INDEX_TABLE = (-1, -1, -1, -1, 2, 4, 6, 8)
+
+
+def _encode_ima_adpcm(samples: np.ndarray) -> bytes:
+    pcm = np.asarray(samples, dtype=np.int16)
+    if pcm.size == 0:
+        pcm = np.zeros(1, dtype=np.int16)
+    predictor = int(pcm[0])
+    step_index = 0
+    nibbles: list[int] = []
+    for target in pcm[1:]:
+        step = _IMA_STEP_TABLE[step_index]
+        difference = int(target) - predictor
+        nibble = 8 if difference < 0 else 0
+        difference = abs(difference)
+        delta = step >> 3
+        if difference >= step:
+            nibble |= 4; difference -= step; delta += step
+        if difference >= step >> 1:
+            nibble |= 2; difference -= step >> 1; delta += step >> 1
+        if difference >= step >> 2:
+            nibble |= 1; delta += step >> 2
+        predictor += -delta if nibble & 8 else delta
+        predictor = max(-32767, min(32767, predictor))
+        step_index = max(0, min(88, step_index + _IMA_INDEX_TABLE[nibble & 7]))
+        nibbles.append(nibble)
+    output = bytearray(struct.pack("<hBB", int(pcm[0]), 0, 0))
+    for index in range(0, len(nibbles), 2):
+        low = nibbles[index]
+        high = nibbles[index + 1] if index + 1 < len(nibbles) else 0
+        output.append(low | (high << 4))
+    while len(output) % 4:
+        output.append(0)
+    return bytes(output)
+
+
+def wav_bytes_to_swav(data: bytes, max_seconds: float = 15.0) -> bytes:
+    """Convert an ordinary WAV into a normalized mono Nintendo DS ADPCM SWAV."""
+    try:
+        with wave.open(io.BytesIO(data), "rb") as source:
+            if source.getcomptype() != "NONE":
+                raise ValueError("Compressed WAV files are not supported")
+            channels = source.getnchannels()
+            width = source.getsampwidth()
+            source_rate = source.getframerate()
+            frame_count = source.getnframes()
+            raw = source.readframes(frame_count)
+    except (wave.Error, EOFError) as exc:
+        raise ValueError(f"Invalid WAV file: {exc}") from exc
+    if channels < 1 or channels > 8 or width not in (1, 2, 3, 4) or source_rate <= 0:
+        raise ValueError("WAV must use uncompressed 8, 16, 24, or 32-bit PCM")
+    if frame_count / source_rate > max_seconds:
+        raise ValueError(f"Sound effects must be {max_seconds:g} seconds or shorter")
+    if width == 1:
+        values = (np.frombuffer(raw, dtype=np.uint8).astype(np.float64) - 128.0) / 128.0
+    elif width == 2:
+        values = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32768.0
+    elif width == 3:
+        packed = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
+        integers = (packed[:, 0].astype(np.int32) |
+                    (packed[:, 1].astype(np.int32) << 8) |
+                    (packed[:, 2].astype(np.int32) << 16))
+        integers = np.where(integers & 0x800000, integers - 0x1000000, integers)
+        values = integers.astype(np.float64) / 8388608.0
+    else:
+        values = np.frombuffer(raw, dtype="<i4").astype(np.float64) / 2147483648.0
+    if values.size % channels:
+        raise ValueError("WAV sample data is truncated")
+    values = values.reshape(-1, channels).mean(axis=1)
+    target_rate = max(8000, min(32768, source_rate))
+    if source_rate != target_rate and values.size > 1:
+        output_count = max(1, round(values.size * target_rate / source_rate))
+        values = np.interp(
+            np.linspace(0, values.size - 1, output_count),
+            np.arange(values.size), values,
+        )
+    peak = float(np.max(np.abs(values))) if values.size else 0.0
+    if peak > 0:
+        values = values * (0.95 / peak)
+    pcm = np.clip(np.rint(values * 32767.0), -32767, 32767).astype("<i2")
+    encoded = _encode_ima_adpcm(pcm)
+    converted = ndspy.soundWave.SWAV.fromData(
+        encoded, waveType=ndspy.soundWave.WaveType.ADPCM, isLooped=False,
+        sampleRate=target_rate, time=max(1, round(NDS_SOUND_CLOCK / target_rate)),
+        loopOffset=0, totalLength=len(encoded) // 4,
+    )
+    return converted.save()
 
 
 def _swav_base_rate(wav) -> float:
@@ -524,7 +662,9 @@ def render_sequence_wav(sdat, asset: AudioAsset, sequence=None,
 
 def render_sequence_ncsf_pcm(sdat, asset: AudioAsset, sequence=None,
                               seconds: float = 30.0,
-                              sample_rate: int = 32768) -> tuple[bytes, int]:
+                              sample_rate: int = 32768,
+                              sample_replacements: dict[str, bytes] | None = None,
+                              ) -> tuple[bytes, int]:
     """Render a top-level SSEQ using the proven in_ncsf/FeOS sound core.
 
     A temporary SDAT is used so unsaved MIDI replacements are previewed without
@@ -536,6 +676,12 @@ def render_sequence_ncsf_pcm(sdat, asset: AudioAsset, sequence=None,
     # Reparse a private SDAT copy before replacing the selected SSEQ. This
     # avoids mutating the GUI's archive while its background worker renders.
     archive = ndspy.soundArchive.SDAT(bytes(sdat.save()))
+    for key, raw_wave in (sample_replacements or {}).items():
+        parts = key.split(":")
+        if len(parts) != 3 or parts[0] != "swar":
+            continue
+        wave_archive = archive.waveArchives[int(parts[1])][1]
+        wave_archive.waves[int(parts[2])] = ndspy.soundWave.SWAV(raw_wave)
     # in_ncsf loads top-level SSEQ records. For a one-sequence SSAR effect,
     # temporarily place its already-parsed event stream in sequence slot 0.
     # Its own bank/player/volume metadata is retained, so the native engine
@@ -573,7 +719,7 @@ def render_sequence_ncsf_pcm(sdat, asset: AudioAsset, sequence=None,
     return pcm, sample_rate
 
 
-def play_pcm_bytes(pcm: bytes, sample_rate: int = 32768) -> None:
+def play_pcm_bytes(pcm: bytes, sample_rate: int = 32768, loop: bool = False) -> None:
     """Play synthesized sequence output directly from memory, without WAV/MIDI files."""
     global _preview_sound, _preview_channel
     # Delay pygame import until playback so command-line extraction remains
@@ -586,8 +732,10 @@ def play_pcm_bytes(pcm: bytes, sample_rate: int = 32768) -> None:
         if pygame.mixer.get_init():
             pygame.mixer.quit()
         pygame.mixer.init(frequency=sample_rate, size=-16, channels=2, buffer=1024)
+    if _preview_channel is not None:
+        _preview_channel.stop()
     _preview_sound = pygame.mixer.Sound(buffer=pcm)
-    _preview_channel = _preview_sound.play()
+    _preview_channel = _preview_sound.play(loops=-1 if loop else 0)
 
 
 def play_wav_bytes(data: bytes) -> Path:

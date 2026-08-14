@@ -35,6 +35,7 @@ from rpgds_core import (
     list_image_assets,
     load_project,
     load_project_audio,
+    load_project_audio_samples,
     parse_chbg,
     prepare_chbg_replacement,
     profile_for_rom,
@@ -50,6 +51,7 @@ from rpgds_core import (
 from rpgds_audio import (
     SDAT_ROM_PATH,
     export_audio_workspace,
+    effect_sample_target,
     list_audio_assets,
     midi_to_sequence,
     midi_track_names,
@@ -59,10 +61,12 @@ from rpgds_audio import (
     sequence_for_asset,
     sequence_to_midi,
     stop_audio,
+    wav_bytes_to_swav,
 )
 
 
 APP_NAME = "RPG Maker DS Toolkit"
+APP_VERSION = "v.0.9.0"
 UI_BG = "#0b0f14"
 UI_PANEL = "#10161d"
 UI_CONTROL = "#1b2530"
@@ -102,7 +106,7 @@ def _legacy_settings_path() -> Path:
 class TranslatorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME} {APP_VERSION}")
         self.overrideredirect(True)
         self._drag_origin: tuple[int, int] | None = None
         self._normal_geometry: str | None = None
@@ -125,6 +129,7 @@ class TranslatorApp(tk.Tk):
         self.filtered_images: list[ImageAsset] = []
         self.image_pngs: dict[str, bytes] = {}
         self.audio_replacements: dict[str, bytes] = {}
+        self.sample_replacements: dict[str, bytes] = {}
         self.sdat = None
         self.audio_assets = []
         self.filtered_audio_assets = []
@@ -299,6 +304,10 @@ class TranslatorApp(tk.Tk):
         tk.Label(
             titlebar, text=APP_NAME, background=UI_BG, foreground=UI_TEXT,
             font=("Consolas", 13, "bold"), anchor=tk.W,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            titlebar, text=APP_VERSION, background=UI_BG, foreground=UI_GREEN,
+            font=("Consolas", 9, "bold"), anchor=tk.W, padx=10,
         ).pack(side=tk.LEFT)
         self.page_title_var = tk.StringVar(value="Dashboard")
         tk.Label(
@@ -739,6 +748,7 @@ class TranslatorApp(tk.Tk):
         ttk.Button(controls, text="Stop", command=stop_audio).pack(side=tk.LEFT, padx=4)
         ttk.Button(controls, text="Export MIDI", command=self.export_audio_midi).pack(side=tk.LEFT, padx=4)
         ttk.Button(controls, text="Import MIDI", command=self.import_audio_midi).pack(side=tk.LEFT, padx=4)
+        ttk.Button(controls, text="Import WAV", command=self.import_audio_wav).pack(side=tk.LEFT, padx=4)
         ttk.Button(controls, text="Revert", command=self.revert_audio).pack(side=tk.LEFT, padx=4)
         tools = ttk.LabelFrame(right, text="Sound-bank tools", padding=14,
                                style="Toolkit.TLabelframe")
@@ -765,7 +775,8 @@ class TranslatorApp(tk.Tk):
         ]
         self.audio_list.delete(0, tk.END)
         for asset in self.filtered_audio_assets:
-            changed = " *" if asset.key in self.audio_replacements else ""
+            changed = " *" if (asset.key in self.audio_replacements
+                                or self._effect_has_replacement(asset)) else ""
             self.audio_list.insert(tk.END, asset.label + changed)
 
     def _audio_selected(self, _event=None) -> None:
@@ -785,10 +796,23 @@ class TranslatorApp(tk.Tk):
             f"Player {asset.player_id}  |  Archive volume {asset.volume}"
         )
         self.audio_note.set(
-            "MIDI replacement loaded; previews and compiled ROMs use it."
-            if asset.key in self.audio_replacements else
+            "Replacement loaded; previews and compiled ROMs use it."
+            if (asset.key in self.audio_replacements or self._effect_has_replacement(asset)) else
             "Preview uses the original sequence and the ROM's native instrument samples."
         )
+
+    def _effect_sample_key(self, asset) -> str | None:
+        if not self.sdat or asset.kind != "se":
+            return None
+        archive_index, wave_index = effect_sample_target(self.sdat, asset)
+        return f"swar:{archive_index}:{wave_index}"
+
+    def _effect_has_replacement(self, asset) -> bool:
+        try:
+            key = self._effect_sample_key(asset)
+        except ValueError:
+            return False
+        return bool(key and key in self.sample_replacements)
 
     def _selected_audio_sequence(self):
         if not self.current_audio or not self.sdat:
@@ -811,16 +835,22 @@ class TranslatorApp(tk.Tk):
         def task():
             sequence = self._selected_audio_sequence()
             duration = 8.0 if asset.kind in {"se", "me"} else 30.0
-            return render_sequence_ncsf_pcm(self.sdat, asset, sequence, duration)
+            return render_sequence_ncsf_pcm(
+                self.sdat, asset, sequence, duration,
+                sample_replacements=self.sample_replacements,
+            )
         def done(result):
             pcm, sample_rate = result
             try:
-                play_pcm_bytes(pcm, sample_rate)
+                play_pcm_bytes(pcm, sample_rate, loop=asset.kind != "se")
             except Exception as exc:
                 messagebox.showerror(APP_NAME, f"Audio output failed:\n{exc}")
                 return
             self.status_var.set(f"Playing {asset.name}")
-            self.audio_note.set("Playing with the in_ncsf / FeOS DS audio engine; no WAV file created.")
+            behavior = "looping" if asset.kind != "se" else "one-shot"
+            self.audio_note.set(
+                f"Playing {behavior} with the in_ncsf / FeOS DS audio engine; no WAV file created."
+            )
         self.status_var.set(f"Rendering {asset.name} with the accurate DS audio engine...")
         self._run_worker(task, done)
 
@@ -841,19 +871,32 @@ class TranslatorApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"MIDI export failed:\n{exc}")
 
-    def _choose_midi_instruments(self, midi, bank) -> list[int] | None:
+    def _choose_midi_instruments(self, midi, bank) -> dict | None:
         names = midi_track_names(midi)
         dialog = tk.Toplevel(self)
-        dialog.title("Assign DS instruments")
+        dialog.title("MIDI Import Setup")
         dialog.configure(background=UI_PANEL)
         dialog.transient(self); dialog.grab_set()
         tk.Label(
-            dialog, text="Assign each MIDI track to an instrument in the selected DS sound bank.",
+            dialog, text="Choose a DS instrument and volume for each MIDI track.",
             background=UI_PANEL, foreground=UI_TEXT, font=("Consolas", 10, "bold"),
             padx=16, pady=14,
         ).pack(anchor=tk.W)
         body = tk.Frame(dialog, background=UI_PANEL, padx=16)
         body.pack(fill=tk.BOTH, expand=True)
+        tempo_row = tk.Frame(body, background=UI_PANEL)
+        tempo_row.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(tempo_row, text="Tempo (BPM)", width=18, anchor=tk.W,
+                 background=UI_PANEL, foreground=UI_TEXT).pack(side=tk.LEFT)
+        source_tempo = next((round(mido.tempo2bpm(message.tempo))
+                             for track in midi.tracks for message in track
+                             if message.type == "set_tempo"), 120)
+        tempo_variable = tk.IntVar(value=source_tempo)
+        tk.Spinbox(tempo_row, from_=20, to=400, textvariable=tempo_variable,
+                   width=8, background=UI_CONTROL, foreground=UI_TEXT,
+                   buttonbackground=UI_CONTROL).pack(side=tk.LEFT)
+        tk.Label(tempo_row, text="The MIDI's detected tempo is used by default.",
+                 background=UI_PANEL, foreground=UI_MUTED).pack(side=tk.LEFT, padx=12)
         instrument_labels = []
         for index, instrument in enumerate(bank.instruments):
             if instrument is not None:
@@ -862,6 +905,7 @@ class TranslatorApp(tk.Tk):
             dialog.destroy()
             raise ValueError("The selected track has no usable instruments")
         variables = []
+        volume_variables = []
         for index, name in enumerate(names[:16]):
             row = tk.Frame(body, background=UI_PANEL)
             row.pack(fill=tk.X, pady=3)
@@ -870,18 +914,68 @@ class TranslatorApp(tk.Tk):
             default = instrument_labels[min(index, len(instrument_labels) - 1)]
             variable = tk.StringVar(value=default)
             ttk.Combobox(row, textvariable=variable, values=instrument_labels,
-                         state="readonly", width=34).pack(side=tk.LEFT)
+                         state="readonly", width=28).pack(side=tk.LEFT)
             variables.append(variable)
-        result = []
+            volume = tk.IntVar(value=100)
+            tk.Label(row, text="Vol", background=UI_PANEL,
+                     foreground=UI_MUTED).pack(side=tk.LEFT, padx=(12, 3))
+            ttk.Scale(row, from_=0, to=127, variable=volume,
+                      orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT)
+            tk.Label(row, textvariable=volume, width=3, background=UI_PANEL,
+                     foreground=UI_TEXT).pack(side=tk.LEFT, padx=(4, 0))
+            volume_variables.append(volume)
+        result = {}
+        preview_status = tk.StringVar(value="Adjust the settings, then preview before importing.")
+        tk.Label(body, textvariable=preview_status, background=UI_PANEL,
+                 foreground=UI_GREEN, anchor=tk.W).pack(fill=tk.X, pady=(10, 0))
+
+        def current_options():
+            return {
+                "instruments": [int(variable.get().split()[0]) for variable in variables],
+                "volumes": [max(0, min(127, int(variable.get())))
+                            for variable in volume_variables],
+                "tempo": max(20, min(400, int(tempo_variable.get()))),
+            }
+
         def accept():
-            result.extend(int(variable.get().split()[0]) for variable in variables)
+            result.update(current_options())
+            stop_audio()
             dialog.destroy()
+
+        def preview():
+            options = current_options()
+            original = sequence_for_asset(self.sdat, self.current_audio)
+            preview_status.set("Rendering this MIDI with the selected DS instruments...")
+            def task():
+                replacement = midi_to_sequence(
+                    midi, options["instruments"], original,
+                    options["volumes"], options["tempo"],
+                )
+                return render_sequence_ncsf_pcm(
+                    self.sdat, self.current_audio, replacement, 30.0,
+                    sample_replacements=self.sample_replacements,
+                )
+            def done(rendered):
+                if not dialog.winfo_exists():
+                    return
+                pcm, sample_rate = rendered
+                play_pcm_bytes(pcm, sample_rate, loop=True)
+                preview_status.set("Preview playing on loop. Change settings and press Preview again.")
+            self._run_worker(task, done)
+
+        def close_dialog():
+            stop_audio()
+            dialog.destroy()
+
         buttons = tk.Frame(dialog, background=UI_PANEL, padx=16, pady=14)
         buttons.pack(fill=tk.X)
         ttk.Button(buttons, text="Import MIDI", command=accept,
                    style="Primary.TButton").pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=8)
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        ttk.Button(buttons, text="Cancel", command=close_dialog).pack(side=tk.RIGHT, padx=8)
+        ttk.Button(buttons, text="Stop", command=stop_audio).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(buttons, text="Preview", command=preview,
+                   style="Primary.TButton").pack(side=tk.LEFT)
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
         self.wait_window(dialog)
         return result or None
 
@@ -902,11 +996,14 @@ class TranslatorApp(tk.Tk):
         try:
             midi = mido.MidiFile(path)
             bank = self.sdat.banks[self.current_audio.bank_id][1]
-            assignments = self._choose_midi_instruments(midi, bank)
-            if assignments is None:
+            options = self._choose_midi_instruments(midi, bank)
+            if options is None:
                 return
             original = sequence_for_asset(self.sdat, self.current_audio)
-            replacement = midi_to_sequence(midi, assignments, original)
+            replacement = midi_to_sequence(
+                midi, options["instruments"], original,
+                options["volumes"], options["tempo"],
+            )
             raw = bytes(replacement.save()[0])
             # Reparse now so malformed event graphs are rejected before saving/building.
             ndspy.soundSequence.SSEQ(raw, original.unk02, original.bankID,
@@ -918,10 +1015,38 @@ class TranslatorApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"MIDI import failed:\n{exc}")
 
+    def import_audio_wav(self) -> None:
+        if not self.current_audio or self.current_audio.kind != "se":
+            messagebox.showinfo(APP_NAME, "Select a sound-effect entry before importing a WAV.")
+            return
+        path = filedialog.askopenfilename(
+            title="Import WAV sound effect", filetypes=(("WAV audio", "*.wav"),),
+        )
+        if not path:
+            return
+        try:
+            archive_index, wave_index = effect_sample_target(self.sdat, self.current_audio)
+            raw_wave = wav_bytes_to_swav(Path(path).read_bytes())
+            key = f"swar:{archive_index}:{wave_index}"
+            self.sample_replacements[key] = raw_wave
+            self.refresh_audio(); self._audio_selected()
+            self.status_var.set(f"Imported WAV into {self.current_audio.name}")
+            self.audio_note.set(
+                "WAV converted to normalized mono DS ADPCM; preview and compiled ROM use it."
+            )
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"WAV import failed:\n{exc}")
+
     def revert_audio(self) -> None:
         if not self.current_audio:
             return
         self.audio_replacements.pop(self.current_audio.key, None)
+        try:
+            sample_key = self._effect_sample_key(self.current_audio)
+            if sample_key:
+                self.sample_replacements.pop(sample_key, None)
+        except ValueError:
+            pass
         self.refresh_audio(); self._audio_selected()
         self.status_var.set(f"Reverted {self.current_audio.name}")
 
@@ -1004,7 +1129,8 @@ class TranslatorApp(tk.Tk):
                   saved_images: dict[str, bytes] | None = None, session_kind: str = "rom",
                   project_path: Path | None = None,
                   saved_embedded_project: EmbeddedProject | None = None,
-                  saved_audio: dict[str, bytes] | None = None) -> None:
+                  saved_audio: dict[str, bytes] | None = None,
+                  saved_audio_samples: dict[str, bytes] | None = None) -> None:
         def task():
             rom = ndspy.rom.NintendoDSRom.fromFile(path)
             profile = profile_for_rom(rom)
@@ -1018,6 +1144,7 @@ class TranslatorApp(tk.Tk):
             self.project_path = project_path if session_kind == "project" else None
             self.image_pngs = dict(saved_images or {})
             self.audio_replacements = dict(saved_audio or {})
+            self.sample_replacements = dict(saved_audio_samples or {})
             self.sdat = ndspy.soundArchive.SDAT(bytes(self.rom.getFileByName(SDAT_ROM_PATH)))
             self.audio_assets = list_audio_assets(self.sdat)
             if saved_rows:
@@ -1038,7 +1165,7 @@ class TranslatorApp(tk.Tk):
             )
             if hasattr(self, "project_save_var"):
                 self.project_save_var.set("")
-            self.title(f"{APP_NAME} - {self.profile.title} [{code}]")
+            self.title(f"{APP_NAME} {APP_VERSION} - {self.profile.title} [{code}]")
             self.append_log(f"Opened {path}\nSHA-256: {digest}\nFound {len(self.entries)} text slots and "
                             f"{len(self.images)} CHBG images.")
             if saved_embedded_project is not None:
@@ -1062,6 +1189,7 @@ class TranslatorApp(tk.Tk):
         try:
             source, rows, images, embedded_project = load_project(path)
             audio = load_project_audio(path)
+            audio_samples = load_project_audio_samples(path)
         except Exception as exc:
             if interactive:
                 messagebox.showerror(APP_NAME, str(exc))
@@ -1085,6 +1213,7 @@ class TranslatorApp(tk.Tk):
             source, rows, images, session_kind="project", project_path=path,
             saved_embedded_project=embedded_project,
             saved_audio=audio,
+            saved_audio_samples=audio_samples,
         )
         return True
 
@@ -1102,10 +1231,11 @@ class TranslatorApp(tk.Tk):
             path = Path(selected)
         try:
             audio_replacements = getattr(self, "audio_replacements", {})
-            if audio_replacements:
+            sample_replacements = getattr(self, "sample_replacements", {})
+            if audio_replacements or sample_replacements:
                 save_project(
                     path, self.source_rom, self.entries, self.image_pngs, None,
-                    audio_replacements,
+                    audio_replacements, sample_replacements,
                 )
             else:
                 save_project(path, self.source_rom, self.entries, self.image_pngs, None)
@@ -1710,6 +1840,7 @@ class TranslatorApp(tk.Tk):
             result = compile_rom(
                 self.source_rom, output_path, self.entries, self.image_pngs,
                 embedded_project, getattr(self, "audio_replacements", {}),
+                getattr(self, "sample_replacements", {}),
             )
             progress(2, 3, "Verifying rebuilt ROM...")
             rebuilt = ndspy.rom.NintendoDSRom.fromFile(output_path)

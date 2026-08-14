@@ -1,5 +1,9 @@
 import tempfile
 import unittest
+import io
+import math
+import wave
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -8,17 +12,22 @@ import mido
 import ndspy.soundSequence
 import ndspy.soundBank
 import ndspy.soundWave
+import numpy as np
+import rpgds_audio
 
 from rpgds_audio import (
     NDS_SOUND_CLOCK,
     _swav_base_rate,
     _swav_loop_start_samples,
+    _decode_swav,
     midi_to_sequence,
     render_sequence_pcm,
     render_sequence_wav,
     sequence_to_midi,
+    wav_bytes_to_swav,
 )
-from rpgds_core import load_project, load_project_audio, save_project
+from rpgds_core import (load_project, load_project_audio,
+                        load_project_audio_samples, save_project)
 
 
 class AudioConversionTests(unittest.TestCase):
@@ -78,6 +87,63 @@ class AudioConversionTests(unittest.TestCase):
             self.assertEqual(loaded_source, source)
             self.assertEqual((rows, images, embedded), ({}, {}, None))
             self.assertEqual(load_project_audio(project), {"bgm:0": replacement})
+
+    def test_project_round_trips_swav_replacement(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.nds"
+            source.write_bytes(b"test source")
+            project = root / "samples.rpgdsproj"
+            replacement = b"SWAV replacement bytes"
+            save_project(project, source, [], {}, None, {}, {"swar:60:0": replacement})
+            self.assertEqual(load_project_audio_samples(project),
+                             {"swar:60:0": replacement})
+
+    def test_wav_import_converts_stereo_pcm_to_normalized_ds_adpcm(self):
+        rate = 22050
+        time = np.arange(rate // 10) / rate
+        mono = (np.sin(time * 2 * math.pi * 440) * 8000).astype("<i2")
+        stereo = np.column_stack((mono, mono)).astype("<i2").tobytes()
+        source = io.BytesIO()
+        with wave.open(source, "wb") as wav_file:
+            wav_file.setnchannels(2)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(rate)
+            wav_file.writeframes(stereo)
+        converted = ndspy.soundWave.SWAV(wav_bytes_to_swav(source.getvalue()))
+        self.assertEqual(converted.waveType, ndspy.soundWave.WaveType.ADPCM)
+        self.assertEqual(converted.sampleRate, rate)
+        self.assertFalse(converted.isLooped)
+        decoded = _decode_swav(converted)
+        self.assertGreater(float(np.max(np.abs(decoded))), 0.75)
+
+    def test_midi_setup_applies_track_volume_and_tempo_override(self):
+        midi = mido.MidiFile(ticks_per_beat=480)
+        track = mido.MidiTrack([
+            mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(90), time=0),
+            mido.Message("note_on", note=60, velocity=100, time=0),
+            mido.Message("note_off", note=60, velocity=0, time=480),
+        ])
+        midi.tracks.append(track)
+        converted = midi_to_sequence(midi, [2], self._base_sequence(), [77], 140)
+        converted.parse()
+        self.assertTrue(any(isinstance(event, ndspy.soundSequence.TrackVolumeSequenceEvent)
+                            and event.value == 77 for event in converted.events))
+        self.assertTrue(any(isinstance(event, ndspy.soundSequence.TempoSequenceEvent)
+                            and event.value == 140 for event in converted.events))
+
+    def test_music_preview_requests_continuous_loop(self):
+        channel = mock.Mock()
+        sound = mock.Mock()
+        sound.play.return_value = channel
+        mixer = mock.Mock()
+        mixer.get_init.return_value = (32768, -16, 2)
+        mixer.Sound.return_value = sound
+        pygame = SimpleNamespace(mixer=mixer)
+        with mock.patch.dict(sys.modules, {"pygame": pygame}), \
+                mock.patch.object(rpgds_audio, "_preview_channel", None):
+            rpgds_audio.play_pcm_bytes(b"\0" * 16, 32768, loop=True)
+        sound.play.assert_called_once_with(loops=-1)
 
     def test_native_preview_handles_one_sample_tail_note(self):
         definition = ndspy.soundBank.NoteDefinition(

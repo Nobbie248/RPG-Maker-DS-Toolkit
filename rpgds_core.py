@@ -26,6 +26,7 @@ import ndspy.fnt
 import ndspy.rom
 import ndspy.soundArchive
 import ndspy.soundSequence
+import ndspy.soundWave
 
 from rpgds_text import (
     format_tokens,
@@ -2156,7 +2157,8 @@ def apply_entries(rom: ndspy.rom.NintendoDSRom, entries: Iterable[TextEntry]) ->
 def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry],
                 image_pngs: dict[str, bytes],
                 embedded_project: EmbeddedProject | None = None,
-                audio_replacements: dict[str, bytes] | None = None) -> tuple[int, int]:
+                audio_replacements: dict[str, bytes] | None = None,
+                sample_replacements: dict[str, bytes] | None = None) -> tuple[int, int]:
     rom = ndspy.rom.NintendoDSRom.fromFile(source_rom)
     if embedded_project is not None:
         if bytes(rom.idCode) != b"VEBJ":
@@ -2187,9 +2189,9 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
             raise ValueError(f"Image replacement {name}: {exc}") from exc
         rom.setFileByName(name, encoded)
         image_count += 1
-    if audio_replacements:
+    if audio_replacements or sample_replacements:
         sdat = ndspy.soundArchive.SDAT(bytes(rom.getFileByName("sound/sound_data.sdat")))
-        for key, raw_sequence in audio_replacements.items():
+        for key, raw_sequence in (audio_replacements or {}).items():
             kind, index_text = key.split(":", 1)
             index = int(index_text)
             if kind not in {"bgm", "bgs", "me"}:
@@ -2200,6 +2202,17 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
                 original.channelPressure, original.polyphonicPressure, original.playerID,
             )
             sdat.sequences[index] = (sdat.sequences[index][0], replacement)
+        for key, raw_wave in (sample_replacements or {}).items():
+            parts = key.split(":")
+            if len(parts) != 3 or parts[0] != "swar":
+                raise ValueError(f"Invalid sound-sample replacement key: {key}")
+            archive_index, wave_index = int(parts[1]), int(parts[2])
+            if archive_index < 0 or archive_index >= len(sdat.waveArchives):
+                raise ValueError(f"Sound archive index is out of range: {key}")
+            archive = sdat.waveArchives[archive_index][1]
+            if wave_index < 0 or wave_index >= len(archive.waves):
+                raise ValueError(f"Sound sample index is out of range: {key}")
+            archive.waves[wave_index] = ndspy.soundWave.SWAV(raw_wave)
         rom.setFileByName("sound/sound_data.sdat", bytes(sdat.save()))
     if embedded_project is not None:
         apply_ds_plus_direct_boot(rom)
@@ -2210,7 +2223,8 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
 def save_project(path: Path, source_rom: Path, entries: Iterable[TextEntry],
                  image_pngs: dict[str, bytes],
                  embedded_project: EmbeddedProject | None = None,
-                 audio_replacements: dict[str, bytes] | None = None) -> None:
+                 audio_replacements: dict[str, bytes] | None = None,
+                 sample_replacements: dict[str, bytes] | None = None) -> None:
     metadata = {"version": PROJECT_VERSION, "source_rom": str(source_rom),
                 "source_sha256": sha256_file(source_rom), "images": {}}
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -2244,6 +2258,12 @@ def save_project(path: Path, source_rom: Path, entries: Iterable[TextEntry],
                 member = f"audio/{index:04d}.sseq"
                 metadata["audio"][key] = member
                 archive.writestr(member, sequence)
+        if sample_replacements:
+            metadata["audio_samples"] = {}
+            for index, (key, wave_data) in enumerate(sorted(sample_replacements.items())):
+                member = f"audio_samples/{index:04d}.swav"
+                metadata["audio_samples"][key] = member
+                archive.writestr(member, wave_data)
         if embedded_project is not None:
             validate_embedded_project(embedded_project)
             metadata["embedded_project"] = {
@@ -2312,3 +2332,11 @@ def load_project_audio(path: Path) -> dict[str, bytes]:
         metadata = json.loads(archive.read("project.json"))
         return {key: archive.read(member)
                 for key, member in metadata.get("audio", {}).items()}
+
+
+def load_project_audio_samples(path: Path) -> dict[str, bytes]:
+    """Load optional SWAV replacements without changing load_project's stable API."""
+    with zipfile.ZipFile(path, "r") as archive:
+        metadata = json.loads(archive.read("project.json"))
+        return {key: archive.read(member)
+                for key, member in metadata.get("audio_samples", {}).items()}
