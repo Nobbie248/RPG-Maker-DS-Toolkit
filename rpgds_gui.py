@@ -54,7 +54,7 @@ from rpgds_audio import (
     midi_to_sequence,
     midi_track_names,
     play_pcm_bytes,
-    render_sequence_pcm,
+    render_sequence_ncsf_pcm,
     safe_filename,
     sequence_for_asset,
     sequence_to_midi,
@@ -811,7 +811,7 @@ class TranslatorApp(tk.Tk):
         def task():
             sequence = self._selected_audio_sequence()
             duration = 8.0 if asset.kind in {"se", "me"} else 30.0
-            return render_sequence_pcm(self.sdat, asset, sequence, duration)
+            return render_sequence_ncsf_pcm(self.sdat, asset, sequence, duration)
         def done(result):
             pcm, sample_rate = result
             try:
@@ -820,8 +820,8 @@ class TranslatorApp(tk.Tk):
                 messagebox.showerror(APP_NAME, f"Audio output failed:\n{exc}")
                 return
             self.status_var.set(f"Playing {asset.name}")
-            self.audio_note.set("In-memory MIDI sequence playback with DS instruments; no WAV file created.")
-        self.status_var.set(f"Rendering {asset.name} with DS instruments...")
+            self.audio_note.set("Playing with the in_ncsf / FeOS DS audio engine; no WAV file created.")
+        self.status_var.set(f"Rendering {asset.name} with the accurate DS audio engine...")
         self._run_worker(task, done)
 
     def export_audio_midi(self) -> None:

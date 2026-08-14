@@ -14,6 +14,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from pathlib import Path
 import mido
 import numpy as np
 import ndspy.soundBank
+import ndspy.soundArchive
 import ndspy.soundSequence
 import ndspy.soundSequenceArchive
 import ndspy.soundWave
@@ -35,6 +37,29 @@ _preview_channel = None
 SDAT_ROM_PATH = "sound/sound_data.sdat"
 TICKS_PER_BEAT = 48
 NDS_SOUND_CLOCK = 16_756_991.0
+
+
+def _ncsf_renderer_path() -> Path:
+    """Locate the bundled in_ncsf renderer in source and frozen builds."""
+    executable = "rpgds_ncsf_preview.exe" if sys.platform == "win32" else "rpgds_ncsf_preview"
+    roots = []
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        roots.append(Path(frozen_root))
+    module_root = Path(__file__).resolve().parent
+    roots.extend((
+        module_root / "native" / "ncsf_preview" / "build",
+        module_root / "native" / "ncsf_preview" / "bin",
+        module_root,
+    ))
+    for root in roots:
+        candidate = root / executable
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(
+        "The accurate DS audio renderer is not installed. Run build_exe.ps1 "
+        "(Windows) or build_linux.sh (Linux) to build it."
+    )
 
 
 @dataclass(frozen=True)
@@ -495,6 +520,57 @@ def render_sequence_wav(sdat, asset: AudioAsset, sequence=None,
         wav_file.setnchannels(2); wav_file.setsampwidth(2); wav_file.setframerate(sample_rate)
         wav_file.writeframes(pcm)
     return output.getvalue()
+
+
+def render_sequence_ncsf_pcm(sdat, asset: AudioAsset, sequence=None,
+                              seconds: float = 30.0,
+                              sample_rate: int = 32768) -> tuple[bytes, int]:
+    """Render a top-level SSEQ using the proven in_ncsf/FeOS sound core.
+
+    A temporary SDAT is used so unsaved MIDI replacements are previewed without
+    changing the loaded toolkit project or source ROM.
+    """
+    if sequence is None:
+        sequence = sequence_for_asset(sdat, asset)
+
+    # Reparse a private SDAT copy before replacing the selected SSEQ. This
+    # avoids mutating the GUI's archive while its background worker renders.
+    archive = ndspy.soundArchive.SDAT(bytes(sdat.save()))
+    # in_ncsf loads top-level SSEQ records. For a one-sequence SSAR effect,
+    # temporarily place its already-parsed event stream in sequence slot 0.
+    # Its own bank/player/volume metadata is retained, so the native engine
+    # resolves the same SBNK and SWARs as the game does.
+    render_index = 0 if asset.kind == "se" else asset.index
+    original_name, original = archive.sequences[render_index]
+    raw_sequence = bytes(sequence.save()[0])
+    replacement = ndspy.soundSequence.SSEQ(
+        raw_sequence, getattr(sequence, "unk02", 0), sequence.bankID,
+        sequence.volume, sequence.channelPressure, sequence.polyphonicPressure,
+        sequence.playerID,
+    )
+    archive.sequences[render_index] = (original_name, replacement)
+
+    renderer = _ncsf_renderer_path()
+    with tempfile.TemporaryDirectory(prefix="rpgds_ncsf_") as folder:
+        folder_path = Path(folder)
+        sdat_path = folder_path / "preview.sdat"
+        pcm_path = folder_path / "preview.pcm"
+        sdat_path.write_bytes(bytes(archive.save()))
+        result = subprocess.run(
+            [str(renderer), str(sdat_path), str(render_index), f"{seconds:.6f}",
+             str(sample_rate), str(pcm_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+            timeout=max(30.0, seconds * 4.0),
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown renderer error"
+            raise RuntimeError(f"Accurate DS audio render failed: {detail}")
+        pcm = pcm_path.read_bytes()
+    expected = int(seconds * sample_rate) * 4
+    if len(pcm) != expected:
+        raise RuntimeError(f"Accurate DS audio renderer returned {len(pcm):,} bytes; expected {expected:,}")
+    return pcm, sample_rate
 
 
 def play_pcm_bytes(pcm: bytes, sample_rate: int = 32768) -> None:

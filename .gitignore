@@ -7,3 +7,4 @@ build/
 *.spec
 dont_commit/
 audio_workspace/
+native/ncsf_preview/build/

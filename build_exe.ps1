@@ -6,6 +6,9 @@ $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $AppName = "RPG Maker DS Toolkit"
 $DistDir = Join-Path $ProjectRoot "dist"
 $BuiltExe = Join-Path $DistDir "$AppName.exe"
+$NativeSource = Join-Path $ProjectRoot "native\ncsf_preview"
+$NativeBuild = Join-Path $NativeSource "build"
+$NativeRenderer = Join-Path $NativeBuild "rpgds_ncsf_preview.exe"
 
 if (-not (Test-Path -LiteralPath $VenvPython)) {
     & $WorkspacePython -m venv (Join-Path $ProjectRoot ".venv")
@@ -13,6 +16,12 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
 
 & $VenvPython -m pip install --disable-pip-version-check -r (Join-Path $ProjectRoot "requirements.txt") pyinstaller
 if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed with exit code $LASTEXITCODE" }
+
+cmake -S $NativeSource -B $NativeBuild -G Ninja -DCMAKE_BUILD_TYPE=Release
+if ($LASTEXITCODE -ne 0) { throw "Native audio renderer configuration failed with exit code $LASTEXITCODE" }
+cmake --build $NativeBuild
+if ($LASTEXITCODE -ne 0) { throw "Native audio renderer build failed with exit code $LASTEXITCODE" }
+
 & $VenvPython -m PyInstaller `
     --noconfirm `
     --clean `
@@ -21,6 +30,7 @@ if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed with exit code 
     --name $AppName `
     --distpath $DistDir `
     --workpath (Join-Path $ProjectRoot "build") `
+    --add-binary "$NativeRenderer;." `
     (Join-Path $ProjectRoot "rpgds_gui.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 

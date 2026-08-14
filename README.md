@@ -139,6 +139,7 @@ Requirements:
 - Python 3.12 or a compatible Python 3 release
 - Tkinter (included with standard Windows Python; on Linux, install your
   distribution's Tk package, such as `python3-tk`)
+- CMake, Ninja, and a C++17 compiler for the accurate DS audio renderer
 
 ### Windows
 
@@ -163,7 +164,7 @@ Install Python, venv, and Tk using your distribution's package manager first.
 For Debian or Ubuntu:
 
 ```bash
-sudo apt install python3 python3-venv python3-tk
+sudo apt install python3 python3-venv python3-tk cmake ninja-build g++
 ```
 
 Then, from a terminal in the repository root:
@@ -172,8 +173,12 @@ Then, from a terminal in the repository root:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt pyinstaller
+cmake -S native/ncsf_preview -B native/ncsf_preview/build \
+  -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build native/ncsf_preview/build
 python -m PyInstaller --noconfirm --clean --onefile --windowed \
-  --name "RPG Maker DS Toolkit" --distpath dist --workpath build rpgds_gui.py
+  --name "RPG Maker DS Toolkit" --distpath dist --workpath build \
+  --add-binary "native/ncsf_preview/build/rpgds_ncsf_preview:." rpgds_gui.py
 rm -rf build "RPG Maker DS Toolkit.spec"
 ```
 
@@ -212,6 +217,11 @@ Project maintained by **Nobbie248**.
 The project uses machine-assisted translation and AI-assisted development.
 Automated translations are treated as drafts and are being reviewed and tested
 in game.
+
+Accurate BGM/BGS/ME preview uses the BSD-licensed **in_ncsf SSEQ Player** by
+Naram Qashat, adapted from the **FeOS Sound System** by fincs and incorporating
+Nintendo DS audio behavior studied by the DeSmuME project. Its license is
+included at `native/ncsf_preview/LICENSE-in_xsf.txt`.
 
 RPG Maker, RPG Tsukuru DS, and RPG Tsukuru DS+ are properties of their
 respective copyright holders. This is an unofficial fan project and is not

@@ -71,15 +71,20 @@ selected track's SBNK each MIDI track should use. MIDI cannot represent every
 Nintendo-specific event, so complex controller behavior and loop boundaries
 may be simplified by a round trip.
 
-The in-memory MIDI-sequence player follows the sequence's real SBNK regions,
-decodes its SWAV ADPCM samples, applies root-pitch resampling, per-track
-transpose, pitch-bend range and live pitch bend, note-wait timing, sequence
-volume and pan, and sends synthesized stereo PCM directly to the audio device
-without creating a WAV file. SSEQ commands C4/C5 are pitch bend and bend range
-despite their historical `Portamento` names in ndspy. It therefore uses game
-instruments, not the computer's General MIDI sound set. It is an editor
-approximation rather than a cycle-accurate emulation of DS envelopes,
-priorities, pitch modulation/slide curves and PSG channels.
+Top-level BGM, BGS and ME preview uses the established **in_ncsf SSEQ Player**
+core rather than the toolkit's original approximate Python synthesizer. The
+portable renderer loads the current SDAT, SSEQ, SBNK and SWAR/SWAV data and
+recreates the FeOS/Nitro channel engine, including DS envelopes, channel
+allocation, pitch/modulation state, PSG/noise channels, looping and hardware
+volume/pan behavior. It renders stereo PCM directly to the audio device without
+creating a user-visible WAV file. Unsaved MIDI replacements are inserted into a
+temporary private SDAT before rendering, so preview does not modify the source
+ROM or toolkit project.
+
+For preview, the toolkit converts an SSAR's single sequence into a temporary
+top-level SSEQ entry while preserving that effect's bank, player, volume and
+controller metadata. This lets in_ncsf render effects through the same accurate
+engine without modifying the loaded ROM, archive, or saved toolkit project.
 
 Pitch is derived from the SWAV `time` value and the 16,756,991 Hz DS sound
 clock, matching the timer programmed by Nitro's driver; the rounded SWAV
@@ -106,3 +111,12 @@ the clean SDAT, replaces the selected numeric sequence ID and rebuilds it.
 Current limitation: MIDI replacement targets BGM, BGS and ME. Effects can be
 previewed, exported and extracted, but SSAR replacement remains disabled until
 shared archive event-offset validation is implemented.
+
+## Accurate renderer provenance
+
+The vendored portable core comes from CyberBotX's `in_xsf`/`in_ncsf` project
+and is distributed under its BSD 3-Clause license. That player was adapted from
+fincs' FeOS Sound System and also incorporates Nintendo DS sample-generation
+behavior from DeSmuME. Toolkit-specific code only provides the small command-line
+PCM bridge and packages it alongside the Python application; the audio engine's
+sequence interpretation remains the upstream implementation.
