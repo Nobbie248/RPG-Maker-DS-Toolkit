@@ -431,6 +431,22 @@ class TranslatorApp(tk.Tk):
         )
         style.map("TButton", background=[("active", UI_CONTROL_HOVER), ("disabled", "#263640")])
         style.configure("Toolkit.TFrame", background=UI_PANEL)
+        style.configure(
+            "Graphics.TNotebook", background=UI_BG, bordercolor=UI_BORDER,
+            lightcolor=UI_BORDER, darkcolor=UI_BORDER, borderwidth=1,
+            tabmargins=(0, 0, 0, 0),
+        )
+        style.configure(
+            "Graphics.TNotebook.Tab", background=UI_CONTROL, foreground=UI_TEXT,
+            bordercolor=UI_BORDER, lightcolor=UI_BORDER, darkcolor=UI_BORDER,
+            font=("Consolas", 9), padding=(11, 6), borderwidth=1,
+        )
+        style.map(
+            "Graphics.TNotebook.Tab",
+            background=[("selected", UI_ACTIVE), ("active", UI_CONTROL_HOVER)],
+            foreground=[("selected", "white"), ("active", "white")],
+            bordercolor=[("selected", UI_GREEN), ("active", UI_BORDER)],
+        )
         style.configure("Toolkit.TLabelframe", background=UI_PANEL, bordercolor=UI_BORDER)
         style.configure(
             "Toolkit.TLabelframe.Label", background=UI_PANEL, foreground=UI_GREEN,
@@ -631,7 +647,9 @@ class TranslatorApp(tk.Tk):
             "Preview, export, replace, and validate ROM artwork without losing palette behavior.",
             UI_BLUE,
         )
-        self.image_category_tabs = ttk.Notebook(self.image_tab, height=1)
+        self.image_category_tabs = ttk.Notebook(
+            self.image_tab, height=1, style="Graphics.TNotebook",
+        )
         self.image_category_pages: dict[str, ttk.Frame] = {}
         for category in IMAGE_CATEGORIES:
             page = ttk.Frame(self.image_category_tabs, height=1, style="Toolkit.TFrame")
