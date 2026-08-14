@@ -17,7 +17,7 @@ from rpgds_core import (
     EmbeddedProject,
     DS_PLUS_DIRECT_BOOT_CODE,
     DS_PLUS_DIRECT_BOOT_CODE_ADDRESS,
-    DS_PLUS_DIRECT_BOOT_BACKDROP_PATH,
+    DS_PLUS_DIRECT_BOOT_BACKDROP_PATHS,
     DS_PLUS_DIRECT_BOOT_HEADLESS_CODE,
     DS_PLUS_DIRECT_BOOT_HEADLESS_CODE_ADDRESS,
     DS_PLUS_DIRECT_BOOT_TRAMPOLINE,
@@ -138,15 +138,20 @@ class EmbeddedProjectTests(unittest.TestCase):
         slot = valid_slot(b"DIRECT BOOT")
         _set_embedded_project_file(rom, slot)
 
-        original_backdrop = bytes(rom.getFileByName(DS_PLUS_DIRECT_BOOT_BACKDROP_PATH))
+        original_backdrops = {
+            path: bytes(rom.getFileByName(path))
+            for path in DS_PLUS_DIRECT_BOOT_BACKDROP_PATHS
+        }
 
         apply_ds_plus_direct_boot(rom)
 
-        black_backdrop = bytes(rom.getFileByName(DS_PLUS_DIRECT_BOOT_BACKDROP_PATH))
-        self.assertEqual(len(black_backdrop), len(original_backdrop))
-        self.assertEqual(black_backdrop[:16], original_backdrop[:16])
-        black_image = decode_chbg(black_backdrop, compressed=False)
-        self.assertEqual(black_image.getbbox(), None)
+        for path, original_backdrop in original_backdrops.items():
+            with self.subTest(backdrop=path):
+                black_backdrop = bytes(rom.getFileByName(path))
+                self.assertEqual(len(black_backdrop), len(original_backdrop))
+                self.assertEqual(black_backdrop[:16], original_backdrop[:16])
+                black_image = decode_chbg(black_backdrop, compressed=False)
+                self.assertEqual(black_image.getbbox(), None)
 
         arm9 = ndspy.codeCompression.decompress(bytes(rom.arm9))
         base = rom.arm9RamAddress

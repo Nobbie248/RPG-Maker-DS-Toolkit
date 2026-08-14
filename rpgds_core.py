@@ -45,7 +45,10 @@ DS_PLUS_PROJECT_INTEGRITY_WORD = 0x99814001
 DESMUME_SAVE_FOOTER_MAGIC = b"|-DESMUME SAVE-|"
 EMBEDDED_PROJECT_ROM_PATH = "embedded/project-slot.bin"
 EMBEDDED_PROJECT_MEMBER = "embedded/project-slot.bin"
-DS_PLUS_DIRECT_BOOT_BACKDROP_PATH = "topmenu/top1.bin"
+DS_PLUS_DIRECT_BOOT_BACKDROP_PATHS = (
+    "topmenu/top1.bin",  # upper-screen city backdrop
+    "topmenu/top2.bin",  # lower-screen project/menu backdrop
+)
 
 # DS+ direct-boot patch.  The injected routine replaces unused C++ exception
 # diagnostic strings in ARM9 (logic_error/length_error); no executable code,
@@ -438,12 +441,15 @@ def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
     # is drawn. It is required loader code and cannot safely be skipped. Mask
     # only that unreachable direct-boot backdrop with an exact-layout black
     # CHBG so no project-picker frame can flash on screen.
-    backdrop_id = rom.filenames.idOf(DS_PLUS_DIRECT_BOOT_BACKDROP_PATH)
-    if backdrop_id is None:
-        raise ValueError("Direct-boot backdrop asset is missing from the DS+ ROM")
-    rom.files[backdrop_id] = _blacken_direct_boot_backdrop(
-        bytes(rom.files[backdrop_id])
-    )
+    for backdrop_path in DS_PLUS_DIRECT_BOOT_BACKDROP_PATHS:
+        backdrop_id = rom.filenames.idOf(backdrop_path)
+        if backdrop_id is None:
+            raise ValueError(
+                f"Direct-boot backdrop asset {backdrop_path} is missing from the DS+ ROM"
+            )
+        rom.files[backdrop_id] = _blacken_direct_boot_backdrop(
+            bytes(rom.files[backdrop_id])
+        )
 
     arm9 = bytearray(ndspy.codeCompression.decompress(bytes(rom.arm9)))
     for address, expected, replacement in DS_PLUS_DIRECT_BOOT_ARM9_PATCHES:

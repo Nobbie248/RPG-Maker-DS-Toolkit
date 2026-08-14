@@ -158,12 +158,13 @@ branch into the same handler used by **Play Game**, with slot 1 already selected
 
 The implemented direct-boot path keeps both DS screens hardware-black while the
 original project loader performs that initialization. The loader's otherwise
-unavoidable city/menu backdrop (`topmenu/top1.bin`) is replaced only in the
-compiled direct-boot ROM by an opaque black CHBG with the exact original header,
-dimensions, bit depth, tile count, tile map, and decoded byte size. This prevents
-the project-selection artwork from flashing between brightness restoration and
-the embedded project's first real frame. Normal translation builds and the
-source ROM retain the original asset.
+unavoidable upper and lower menu backdrops (`topmenu/top1.bin` and
+`topmenu/top2.bin`) are replaced only in the compiled direct-boot ROM by opaque
+black CHBGs with their exact original headers, dimensions, bit depths, tile
+counts, tile maps, and decoded byte sizes. This prevents either DS screen from
+flashing project-selection artwork between brightness restoration and the
+embedded project's first real frame. Normal translation builds and the source
+ROM retain the original assets.
 
 For development, a boot override such as holding **Select** should bypass direct
 boot and show the normal title/editor interface. This prevents a bad embedded
