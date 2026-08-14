@@ -46,6 +46,28 @@ from rpgds_core import (
 
 
 APP_NAME = "RPG Maker DS Toolkit"
+UI_BG = "#0b0f14"
+UI_PANEL = "#10161d"
+UI_CONTROL = "#1b2530"
+UI_CONTROL_HOVER = "#243442"
+UI_BORDER = "#324553"
+UI_TEXT = "#e6edf3"
+UI_MUTED = "#91a4b2"
+UI_BLUE = "#38bdf8"
+UI_GREEN = "#2dd4bf"
+UI_ACTIVE = "#0f766e"
+TRANSLATION_LANGUAGES = {
+    "English": "en",
+    "Spanish": "es",
+    "French": "fr",
+    "German": "de",
+    "Italian": "it",
+    "Portuguese": "pt",
+    "Dutch": "nl",
+    "Polish": "pl",
+    "Turkish": "tr",
+    "Indonesian": "id",
+}
 
 
 def _settings_path() -> Path:
@@ -64,8 +86,16 @@ class TranslatorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1180x780")
-        self.minsize(960, 640)
+        self.overrideredirect(True)
+        self._drag_origin: tuple[int, int] | None = None
+        self._normal_geometry: str | None = None
+        self._is_maximized = False
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        window_width = min(1180, max(820, screen_width - 80))
+        window_height = min(780, max(600, screen_height - 100))
+        self.geometry(f"{window_width}x{window_height}")
+        self.minsize(min(900, window_width), min(620, window_height))
         self.option_add("*Font", ("Segoe UI", 9))
 
         self.source_rom: Path | None = None
@@ -88,6 +118,95 @@ class TranslatorApp(tk.Tk):
         self.after(100, self._poll_worker)
         self.after(250, self._auto_load_last_session)
 
+    def _build_window_caption(self) -> None:
+        caption = tk.Frame(self, background="#000000", height=31)
+        caption.pack(fill=tk.X)
+        caption.pack_propagate(False)
+        title = tk.Label(
+            caption, text=APP_NAME, background="#000000", foreground=UI_TEXT,
+            font=("Segoe UI", 9), anchor=tk.W, padx=12,
+        )
+        title.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.maximize_button = tk.Button(
+            caption, text="□", command=self._toggle_maximize,
+            background="#000000", foreground=UI_TEXT,
+            activebackground=UI_CONTROL_HOVER, activeforeground="white",
+            relief=tk.FLAT, borderwidth=0, width=6, font=("Segoe UI", 10),
+        )
+        close_button = tk.Button(
+            caption, text="✕", command=self.destroy,
+            background="#000000", foreground=UI_TEXT,
+            activebackground="#c42b1c", activeforeground="white",
+            relief=tk.FLAT, borderwidth=0, width=6, font=("Segoe UI", 10),
+        )
+        minimize_button = tk.Button(
+            caption, text="—", command=self._minimize_window,
+            background="#000000", foreground=UI_TEXT,
+            activebackground=UI_CONTROL_HOVER, activeforeground="white",
+            relief=tk.FLAT, borderwidth=0, width=6, font=("Segoe UI", 10),
+        )
+        close_button.pack(side=tk.RIGHT, fill=tk.Y)
+        self.maximize_button.pack(side=tk.RIGHT, fill=tk.Y)
+        minimize_button.pack(side=tk.RIGHT, fill=tk.Y)
+        for widget in (caption, title):
+            widget.bind("<ButtonPress-1>", self._start_window_drag)
+            widget.bind("<B1-Motion>", self._drag_window)
+            widget.bind("<Double-Button-1>", lambda _event: self._toggle_maximize())
+
+    def _start_window_drag(self, event: tk.Event) -> None:
+        if self._is_maximized:
+            return
+        self._drag_origin = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
+
+    def _drag_window(self, event: tk.Event) -> None:
+        if self._drag_origin is None or self._is_maximized:
+            return
+        offset_x, offset_y = self._drag_origin
+        self.geometry(f"+{event.x_root - offset_x}+{event.y_root - offset_y}")
+
+    def _toggle_maximize(self) -> None:
+        if self._is_maximized:
+            if self._normal_geometry:
+                self.geometry(self._normal_geometry)
+            self._is_maximized = False
+            self.maximize_button.configure(text="□")
+            return
+        self._normal_geometry = self.geometry()
+        left = top = 0
+        width = self.winfo_screenwidth()
+        height = self.winfo_screenheight()
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                class Rect(ctypes.Structure):
+                    _fields_ = (("left", ctypes.c_long), ("top", ctypes.c_long),
+                                ("right", ctypes.c_long), ("bottom", ctypes.c_long))
+
+                work_area = Rect()
+                if ctypes.windll.user32.SystemParametersInfoW(
+                    0x0030, 0, ctypes.byref(work_area), 0,
+                ):
+                    left, top = work_area.left, work_area.top
+                    width = work_area.right - work_area.left
+                    height = work_area.bottom - work_area.top
+            except (AttributeError, OSError):
+                pass
+        self.geometry(f"{width}x{height}+{left}+{top}")
+        self._is_maximized = True
+        self.maximize_button.configure(text="❐")
+
+    def _minimize_window(self) -> None:
+        self.overrideredirect(False)
+        self.iconify()
+        self.after(100, self._restore_borderless_after_minimize)
+
+    def _restore_borderless_after_minimize(self) -> None:
+        if self.state() == "iconic":
+            self.after(100, self._restore_borderless_after_minimize)
+            return
+        self.overrideredirect(True)
+
     def _read_settings(self) -> dict[str, str]:
         for path in (self.settings_path, _legacy_settings_path()):
             try:
@@ -109,6 +228,9 @@ class TranslatorApp(tk.Tk):
         self.session_settings["last_rom"] = str(rom_path.resolve())
         if project_path is not None:
             self.session_settings["last_project"] = str(project_path.resolve())
+        self._persist_session_settings()
+
+    def _persist_session_settings(self) -> None:
         try:
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.settings_path.with_suffix(".tmp")
@@ -144,53 +266,237 @@ class TranslatorApp(tk.Tk):
             self.append_log("Recent project/ROM was moved or deleted; automatic reopening was skipped.")
 
     def _build_ui(self) -> None:
-        toolbar = ttk.Frame(self, padding=(8, 7))
-        toolbar.pack(fill=tk.X)
-        ttk.Button(toolbar, text="Open ROM", command=self.open_rom).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(toolbar, text="Open Project", command=self.open_project).pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar, text="Save Project", command=self.save_project).pack(side=tk.LEFT, padx=5)
-        self.embed_button = ttk.Button(
-            toolbar, text="Build Direct-Boot ROM from Save", command=self.embed_project_from_save,
-        )
-        self.embed_button.pack(side=tk.LEFT, padx=5)
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        self.quick_button = ttk.Button(toolbar, text="Quick Auto", command=self.quick_auto)
-        self.quick_button.pack(side=tk.LEFT, padx=5)
-        self.online_button = ttk.Button(toolbar, text="Auto Translate + Shorten (Online)", command=self.online_auto)
-        self.online_button.pack(side=tk.LEFT, padx=5)
-        self.compile_button = ttk.Button(toolbar, text="Compile ROM", command=self.compile)
-        self.compile_button.pack(side=tk.RIGHT, padx=5)
-
+        self.configure(background=UI_BG)
+        self._configure_styles()
         self.status_var = tk.StringVar(value="Open the original RPG Tsukuru DS ROM to begin.")
-        ttk.Label(self, textvariable=self.status_var, anchor=tk.W, padding=(8, 4)).pack(fill=tk.X)
-        self.session_var = tk.StringVar(value="No ROM loaded")
-        ttk.Label(self, textvariable=self.session_var, anchor=tk.W, padding=(8, 0, 8, 4),
-                  foreground="#555555").pack(fill=tk.X)
-        self.progress = ttk.Progressbar(self, mode="determinate")
-        self.progress.pack(fill=tk.X, padx=8)
+        self.session_var = tk.StringVar(value="No original ROM loaded")
+        self._build_window_caption()
 
-        self.tabs = ttk.Notebook(self)
-        self.tabs.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.text_tab = ttk.Frame(self.tabs)
-        self.image_tab = ttk.Frame(self.tabs)
-        self.log_tab = ttk.Frame(self.tabs)
-        self.tabs.add(self.text_tab, text="Text")
-        self.tabs.add(self.image_tab, text="Images")
-        self.tabs.add(self.log_tab, text="Build Log")
+        titlebar = tk.Frame(self, background=UI_BG, padx=16, pady=8)
+        titlebar.pack(fill=tk.X)
+        tk.Label(
+            titlebar, text=APP_NAME, background=UI_BG, foreground=UI_TEXT,
+            font=("Consolas", 13, "bold"), anchor=tk.W,
+        ).pack(side=tk.LEFT)
+        self.page_title_var = tk.StringVar(value="Dashboard")
+        tk.Label(
+            titlebar, textvariable=self.page_title_var, background=UI_BG,
+            foreground=UI_GREEN, font=("Consolas", 9), anchor=tk.E,
+        ).pack(side=tk.RIGHT)
+
+        nav_border = tk.Frame(self, background=UI_BORDER, height=1)
+        nav_border.pack(fill=tk.X, padx=14)
+        nav = tk.Frame(self, background=UI_BG, padx=14, pady=7)
+        nav.pack(fill=tk.X)
+        self.nav_buttons: dict[str, tk.Button] = {}
+        nav_items = (
+            ("edit", "File"), ("text", "Text"),
+            ("graphics", "Graphics"), ("compile", "Compile"),
+            ("direct", "Direct Boot"), ("audio", "Music / SFX"),
+        )
+        for name, label in nav_items:
+            button = tk.Button(
+                nav, text=label, command=lambda target=name: self.show_page(target),
+                background=UI_CONTROL, foreground=UI_TEXT, activebackground=UI_CONTROL_HOVER,
+                activeforeground="white", relief=tk.FLAT, borderwidth=0,
+                highlightthickness=1, highlightbackground=UI_BORDER,
+                font=("Consolas", 9), padx=15, pady=6, cursor="hand2",
+            )
+            button.pack(side=tk.LEFT, padx=(0, 2))
+            self.nav_buttons[name] = button
+
+        session_bar = tk.Frame(self, background=UI_PANEL, padx=18, pady=7)
+        session_bar.pack(fill=tk.X)
+        tk.Label(
+            session_bar, textvariable=self.session_var, background=UI_PANEL,
+            foreground=UI_MUTED, font=("Consolas", 9), anchor=tk.W,
+        ).pack(fill=tk.X)
+
+        self.page_container = tk.Frame(self, background=UI_BG)
+        self.page_container.pack(fill=tk.BOTH, expand=True)
+        self.page_container.grid_rowconfigure(0, weight=1)
+        self.page_container.grid_columnconfigure(0, weight=1)
+        self.pages: dict[str, tk.Widget] = {}
+        for name in ("edit", "text", "graphics", "compile", "direct", "audio"):
+            page = tk.Frame(self.page_container, background=UI_BG)
+            page.grid(row=0, column=0, sticky="nsew")
+            self.pages[name] = page
+
+        self.text_tab = self.pages["text"]
+        self.image_tab = self.pages["graphics"]
+        self.log_tab = self.pages["compile"]
+        self._build_edit_page()
         self._build_text_tab()
         self._build_image_tab()
-        self._build_log_tab()
+        self._build_compile_page()
+        self._build_direct_boot_page()
+        self._build_audio_page()
+
+        footer = tk.Frame(self, background=UI_BG, padx=16, pady=7)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Frame(footer, background=UI_BORDER, height=1).pack(fill=tk.X, pady=(0, 7))
+        tk.Label(
+            footer, textvariable=self.status_var, background=UI_BG, foreground=UI_MUTED,
+            font=("Consolas", 9), anchor=tk.W,
+        ).pack(fill=tk.X)
+        self.progress = ttk.Progressbar(footer, mode="determinate", style="Toolkit.Horizontal.TProgressbar")
+        self.progress.pack(fill=tk.X, pady=(5, 0))
+        self.show_page("edit")
+
+    def _configure_styles(self) -> None:
+        style = ttk.Style(self)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure(".", background=UI_BG, foreground=UI_TEXT, font=("Consolas", 9))
+        style.configure("TFrame", background=UI_BG)
+        style.configure("TLabel", background=UI_PANEL, foreground=UI_TEXT)
+        style.configure("TPanedwindow", background=UI_BG)
+        style.configure(
+            "TButton", background=UI_CONTROL, foreground=UI_TEXT,
+            font=("Consolas", 9), padding=(10, 6), borderwidth=1,
+        )
+        style.map("TButton", background=[("active", UI_CONTROL_HOVER), ("disabled", "#263640")])
+        style.configure("Toolkit.TFrame", background=UI_PANEL)
+        style.configure("Toolkit.TLabelframe", background=UI_PANEL, bordercolor=UI_BORDER)
+        style.configure(
+            "Toolkit.TLabelframe.Label", background=UI_PANEL, foreground=UI_GREEN,
+            font=("Consolas", 10, "bold"),
+        )
+        style.configure(
+            "Primary.TButton", background="#155e75", foreground="white",
+            font=("Consolas", 10, "bold"), padding=(14, 9), borderwidth=1,
+        )
+        style.map("Primary.TButton", background=[("active", "#0e7490"), ("disabled", "#263640")])
+        style.configure(
+            "Secondary.TButton", background=UI_CONTROL, foreground=UI_TEXT,
+            font=("Consolas", 9), padding=(11, 7), borderwidth=1,
+        )
+        style.map("Secondary.TButton", background=[("active", UI_CONTROL_HOVER)])
+        style.configure(
+            "Treeview", rowheight=28, font=("Consolas", 9), background=UI_PANEL,
+            foreground=UI_TEXT, fieldbackground=UI_PANEL, bordercolor=UI_BORDER,
+        )
+        style.map("Treeview", background=[("selected", UI_ACTIVE)], foreground=[("selected", "white")])
+        style.configure(
+            "Treeview.Heading", font=("Consolas", 9, "bold"), padding=(6, 7),
+            background=UI_CONTROL, foreground=UI_TEXT, bordercolor=UI_BORDER,
+        )
+        style.configure("TEntry", fieldbackground=UI_CONTROL, foreground=UI_TEXT, insertcolor=UI_TEXT)
+        style.configure(
+            "TCombobox", fieldbackground=UI_CONTROL, background=UI_CONTROL,
+            foreground=UI_TEXT, arrowcolor=UI_GREEN, bordercolor=UI_BORDER,
+        )
+        style.map(
+            "TCombobox", fieldbackground=[("readonly", UI_CONTROL)],
+            foreground=[("readonly", UI_TEXT)], selectbackground=[("readonly", UI_CONTROL)],
+            selectforeground=[("readonly", UI_TEXT)],
+        )
+        style.configure(
+            "Toolkit.Horizontal.TProgressbar", troughcolor=UI_CONTROL,
+            background=UI_GREEN, bordercolor=UI_CONTROL, lightcolor=UI_GREEN,
+            darkcolor=UI_GREEN,
+        )
+
+    def show_page(self, name: str) -> None:
+        page = self.pages.get(name)
+        if page is None:
+            raise ValueError(f"Unknown application page: {name}")
+        titles = {
+            "edit": "File", "text": "Text & Translation",
+            "graphics": "Graphics Studio", "compile": "Compile & Build Log",
+            "direct": "Direct-Boot Builder", "audio": "Music & Sound Effects",
+        }
+        self.page_title_var.set(titles[name])
+        for page_name, button in getattr(self, "nav_buttons", {}).items():
+            active = page_name == name
+            button.configure(
+                background=UI_ACTIVE if active else UI_CONTROL,
+                foreground="white" if active else UI_TEXT,
+                highlightbackground=UI_GREEN if active else UI_BORDER,
+            )
+        page.tkraise()
+
+    def _page_heading(self, parent: tk.Widget, title: str, subtitle: str, color: str) -> tk.Frame:
+        banner = tk.Frame(
+            parent, background=UI_PANEL, padx=18, pady=13,
+            highlightthickness=1, highlightbackground=UI_BORDER,
+        )
+        banner.pack(fill=tk.X, padx=20, pady=(14, 10))
+        tk.Label(
+            banner, text=title, background=UI_PANEL, foreground=color,
+            font=("Consolas", 13, "bold"), anchor=tk.W,
+        ).pack(anchor=tk.W)
+        tk.Label(
+            banner, text=subtitle, background=UI_PANEL, foreground=UI_MUTED,
+            font=("Consolas", 9), anchor=tk.W, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(3, 0))
+        return banner
+
+    def _build_edit_page(self) -> None:
+        page = self.pages["edit"]
+        self._page_heading(
+            page, "File", "Open source material, resume a toolkit project, or save your current work.",
+            UI_BLUE,
+        )
+        body = tk.Frame(page, background=UI_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        actions = tk.Frame(
+            body, background=UI_PANEL, padx=18, pady=18,
+            highlightthickness=1, highlightbackground=UI_BORDER,
+        )
+        actions.pack(fill=tk.X)
+        tk.Label(
+            actions, text="Project Files", background=UI_PANEL, foreground=UI_GREEN,
+            font=("Consolas", 10, "bold"),
+        ).pack(anchor=tk.W, pady=(0, 12))
+        row = tk.Frame(actions, background=UI_PANEL)
+        row.pack(fill=tk.X)
+        ttk.Button(row, text="Open Original ROM", command=self.open_rom, style="Primary.TButton").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(row, text="Open Toolkit Project", command=self.open_project, style="Secondary.TButton").pack(side=tk.LEFT, padx=8)
+        ttk.Button(row, text="Save Toolkit Project", command=self.save_project, style="Secondary.TButton").pack(side=tk.LEFT, padx=8)
 
     def _build_text_tab(self) -> None:
-        controls = ttk.Frame(self.text_tab, padding=6)
-        controls.pack(fill=tk.X)
-        ttk.Label(controls, text="Filter:").pack(side=tk.LEFT)
+        self._page_heading(
+            self.text_tab, "Text & Translation",
+            "Search every exposed string, apply translations, and keep byte-sensitive game text safe.",
+            UI_GREEN,
+        )
+        controls = ttk.Frame(self.text_tab, padding=(20, 6), style="Toolkit.TFrame")
+        controls.pack(fill=tk.X, padx=20)
+        filter_row = ttk.Frame(controls, style="Toolkit.TFrame")
+        filter_row.pack(fill=tk.X)
+        ttk.Label(filter_row, text="Filter:").pack(side=tk.LEFT)
         self.text_filter = tk.StringVar()
-        entry = ttk.Entry(controls, textvariable=self.text_filter, width=45)
+        entry = ttk.Entry(filter_row, textvariable=self.text_filter, width=45)
         entry.pack(side=tk.LEFT, padx=6)
         self.text_filter.trace_add("write", lambda *_: self.refresh_texts())
         self.text_summary = tk.StringVar(value="0 strings")
-        ttk.Label(controls, textvariable=self.text_summary).pack(side=tk.RIGHT)
+        ttk.Label(filter_row, textvariable=self.text_summary).pack(side=tk.RIGHT)
+
+        auto_row = ttk.Frame(controls, style="Toolkit.TFrame")
+        auto_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(auto_row, text="Google Translate target:").pack(side=tk.LEFT)
+        saved_language = self.session_settings.get("translation_language", "en")
+        selected_name = next(
+            (name for name, code in TRANSLATION_LANGUAGES.items() if code == saved_language),
+            "English",
+        )
+        self.target_language_var = tk.StringVar(value=selected_name)
+        self.target_language_combo = ttk.Combobox(
+            auto_row, textvariable=self.target_language_var,
+            values=tuple(TRANSLATION_LANGUAGES), state="readonly", width=16,
+        )
+        self.target_language_combo.pack(side=tk.LEFT, padx=(7, 12))
+        self.target_language_combo.bind("<<ComboboxSelected>>", self._translation_language_changed)
+        self.quick_button = ttk.Button(
+            auto_row, text="Auto Translate", command=self.quick_auto, style="Secondary.TButton",
+        )
+        self.quick_button.pack(side=tk.LEFT, padx=(10, 4))
+        self.online_button = ttk.Button(
+            auto_row, text="Auto Translate + Shorten", command=self.online_auto,
+            style="Secondary.TButton",
+        )
+        self.online_button.pack(side=tk.LEFT, padx=4)
 
         columns = ("location", "original", "translation", "bytes", "status")
         self.text_tree = ttk.Treeview(self.text_tab, columns=columns, show="headings", selectmode="browse")
@@ -203,17 +509,33 @@ class TranslatorApp(tk.Tk):
                                   stretch=column in ("original", "translation"))
         scroll = ttk.Scrollbar(self.text_tab, orient=tk.VERTICAL, command=self.text_tree.yview)
         self.text_tree.configure(yscrollcommand=scroll.set)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.text_tree.pack(fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 20), pady=(8, 0))
+        self.text_tree.pack(fill=tk.BOTH, expand=True, padx=(20, 0), pady=(8, 0))
         self.text_tree.bind("<<TreeviewSelect>>", self._text_selected)
+        self.text_tree.bind("<Motion>", self._text_tree_hover)
+        self.text_tree.bind("<Button-1>", self._text_tree_clicked, add="+")
+        self.text_tree.bind("<Button-3>", self._text_tree_clicked, add="+")
+        self.japanese_text_menu = tk.Menu(
+            self, tearoff=False, background=UI_CONTROL, foreground=UI_TEXT,
+            activebackground=UI_ACTIVE, activeforeground="white", font=("Consolas", 9),
+        )
+        self.japanese_text_menu.add_command(
+            label="Copy Japanese to Clipboard", command=self._copy_selected_japanese,
+        )
 
-        editor = ttk.LabelFrame(self.text_tab, text="Selected string", padding=8)
-        editor.pack(fill=tk.X, pady=(7, 0))
+        editor = ttk.LabelFrame(
+            self.text_tab, text="Selected string", padding=10, style="Toolkit.TLabelframe",
+        )
+        editor.pack(fill=tk.X, padx=20, pady=(10, 18))
         self.original_var = tk.StringVar(value="Japanese text")
         ttk.Label(editor, textvariable=self.original_var, wraplength=1060).grid(row=0, column=0, columnspan=5,
                                                                                sticky=tk.W, pady=(0, 6))
         ttk.Label(editor, text="English:").grid(row=1, column=0, sticky=tk.W)
-        self.translation_entry = tk.Text(editor, height=3, wrap=tk.WORD, undo=True)
+        self.translation_entry = tk.Text(
+            editor, height=3, wrap=tk.WORD, undo=True, background=UI_CONTROL,
+            foreground=UI_TEXT, insertbackground=UI_TEXT, selectbackground=UI_ACTIVE,
+            relief=tk.FLAT, font=("Consolas", 10), padx=8, pady=6,
+        )
         self.translation_entry.grid(row=1, column=1, sticky=tk.EW, padx=6)
         self.translation_entry.bind("<<Modified>>", self._translation_modified)
         self.byte_var = tk.StringVar(value="0 / 0 original bytes")
@@ -225,10 +547,15 @@ class TranslatorApp(tk.Tk):
         editor.columnconfigure(1, weight=1)
 
     def _build_image_tab(self) -> None:
+        self._page_heading(
+            self.image_tab, "Graphics Studio",
+            "Preview, export, replace, and validate ROM artwork without losing palette behavior.",
+            UI_BLUE,
+        )
         pane = ttk.Panedwindow(self.image_tab, orient=tk.HORIZONTAL)
-        pane.pack(fill=tk.BOTH, expand=True)
-        left = ttk.Frame(pane, padding=6)
-        right = ttk.Frame(pane, padding=8)
+        pane.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 18))
+        left = ttk.Frame(pane, padding=10, style="Toolkit.TFrame")
+        right = ttk.Frame(pane, padding=10, style="Toolkit.TFrame")
         pane.add(left, weight=1)
         pane.add(right, weight=3)
 
@@ -236,9 +563,14 @@ class TranslatorApp(tk.Tk):
         self.image_filter = tk.StringVar()
         ttk.Entry(left, textvariable=self.image_filter).pack(fill=tk.X, pady=(3, 6))
         self.image_filter.trace_add("write", lambda *_: self.refresh_images())
-        list_frame = ttk.Frame(left)
+        list_frame = ttk.Frame(left, style="Toolkit.TFrame")
         list_frame.pack(fill=tk.BOTH, expand=True)
-        self.image_list = tk.Listbox(list_frame, exportselection=False, width=40)
+        self.image_list = tk.Listbox(
+            list_frame, exportselection=False, width=40, background=UI_CONTROL,
+            foreground=UI_TEXT, selectbackground=UI_ACTIVE, selectforeground="white",
+            relief=tk.FLAT, borderwidth=0, highlightthickness=1,
+            highlightbackground=UI_BORDER, font=("Consolas", 9),
+        )
         image_scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.image_list.yview)
         self.image_list.configure(yscrollcommand=image_scroll.set)
         self.image_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -247,13 +579,13 @@ class TranslatorApp(tk.Tk):
 
         self.image_info = tk.StringVar(value="Select a CHBG asset")
         ttk.Label(right, textvariable=self.image_info).pack(anchor=tk.W)
-        preview_frame = ttk.Frame(right, relief=tk.SUNKEN, borderwidth=1)
+        preview_frame = ttk.Frame(right, relief=tk.SUNKEN, borderwidth=1, style="Toolkit.TFrame")
         preview_frame.pack(fill=tk.BOTH, expand=True, pady=8)
-        self.preview_canvas = tk.Canvas(preview_frame, background="#303030", highlightthickness=0)
+        self.preview_canvas = tk.Canvas(preview_frame, background="#090d12", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
         self.preview_canvas.bind("<Configure>", lambda _event: self._draw_preview())
 
-        buttons = ttk.Frame(right)
+        buttons = ttk.Frame(right, style="Toolkit.TFrame")
         buttons.pack(fill=tk.X)
         ttk.Button(buttons, text="Export PNG", command=self.export_image).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Import PNG", command=self.import_image).pack(side=tk.LEFT, padx=4)
@@ -264,10 +596,117 @@ class TranslatorApp(tk.Tk):
         )).pack(
             side=tk.RIGHT)
 
-    def _build_log_tab(self) -> None:
-        self.log = tk.Text(self.log_tab, wrap=tk.WORD, state=tk.DISABLED, background="#171717",
-                           foreground="#e5e5e5", insertbackground="white")
+    def _build_compile_page(self) -> None:
+        page = self.pages["compile"]
+        self._page_heading(
+            page, "Compile ROM", "Build a standard translated ROM and verify it before testing.",
+            UI_GREEN,
+        )
+        action = tk.Frame(
+            page, background=UI_PANEL, padx=18, pady=14,
+            highlightthickness=1, highlightbackground=UI_BORDER,
+        )
+        action.pack(fill=tk.X, padx=20)
+        tk.Label(
+            action,
+            text="This build uses the loaded text and graphics but does not include a direct-boot project.",
+            background=UI_PANEL, foreground=UI_MUTED, font=("Consolas", 9),
+        ).pack(side=tk.LEFT)
+        self.compile_button = ttk.Button(
+            action, text="Compile Standard ROM", command=self.compile, style="Primary.TButton",
+        )
+        self.compile_button.pack(side=tk.RIGHT)
+        log_frame = tk.Frame(page, background=UI_BORDER, padx=1, pady=1)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(12, 18))
+        tk.Label(
+            log_frame, text="Build Log", background=UI_PANEL, foreground=UI_BLUE,
+            font=("Consolas", 10, "bold"), anchor=tk.W, padx=12, pady=8,
+        ).pack(fill=tk.X)
+        self.log = tk.Text(
+            log_frame, wrap=tk.WORD, state=tk.DISABLED, background=UI_BG,
+            foreground=UI_TEXT, insertbackground="white", relief=tk.FLAT,
+            font=("Consolas", 9), padx=12, pady=10,
+        )
         self.log.pack(fill=tk.BOTH, expand=True)
+
+    def _build_direct_boot_page(self) -> None:
+        page = self.pages["direct"]
+        self._page_heading(
+            page, "Direct-Boot ROM Builder",
+            "Turn one created RPG Maker project into a ROM that launches the game automatically.",
+            UI_BLUE,
+        )
+        content = tk.Frame(
+            page, background=UI_PANEL, padx=22, pady=22,
+            highlightthickness=1, highlightbackground=UI_BORDER,
+        )
+        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        tk.Label(
+            content, text="Build From a Save File", background=UI_PANEL, foreground=UI_GREEN,
+            font=("Consolas", 11, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            content,
+            text=("Choose a DS+ .sav or DeSmuME .dsv file, select one valid created-game slot, then "
+                  "choose an output ROM. The selected game is used only for this build. Your loaded "
+                  ".rpgdsproj remains unchanged, and normal Compile ROM builds remain standard."),
+            background=UI_PANEL, foreground=UI_MUTED, font=("Consolas", 9),
+            justify=tk.LEFT, wraplength=900,
+        ).pack(anchor=tk.W, pady=(10, 20))
+        notes = tk.Frame(
+            content, background=UI_CONTROL, padx=16, pady=14,
+            highlightthickness=1, highlightbackground=UI_BORDER,
+        )
+        notes.pack(fill=tk.X, pady=(0, 22))
+        tk.Label(
+            notes,
+            text=("DIRECT-BOOT BEHAVIOR\nSkips boot logos, the title menu, and project picker. On a blank "
+                  "save, the embedded project is installed into slot 1 and launched through the game's "
+                  "native play path."),
+            background=UI_CONTROL, foreground=UI_TEXT, font=("Consolas", 9),
+            justify=tk.LEFT, wraplength=860,
+        ).pack(anchor=tk.W)
+        self.embed_button = ttk.Button(
+            content, text="Select Save and Build Direct-Boot ROM",
+            command=self.embed_project_from_save, style="Primary.TButton",
+        )
+        self.embed_button.pack(anchor=tk.W)
+
+    def _build_audio_page(self) -> None:
+        page = self.pages["audio"]
+        self._page_heading(
+            page, "Music & Sound Effects",
+            "The home for audio discovery, preview, extraction, and replacement.",
+            UI_GREEN,
+        )
+        content = tk.Frame(
+            page, background=UI_PANEL, padx=22, pady=22,
+            highlightthickness=1, highlightbackground=UI_BORDER,
+        )
+        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        tk.Label(
+            content, text="Audio Workspace", background=UI_PANEL, foreground=UI_BLUE,
+            font=("Consolas", 11, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            content,
+            text=("Music and SFX editing is the next toolkit module. This dedicated workspace is now "
+                  "part of the application layout so audio tools can be added without crowding Text or "
+                  "Graphics."),
+            background=UI_PANEL, foreground=UI_MUTED, font=("Consolas", 9),
+            justify=tk.LEFT, wraplength=880,
+        ).pack(anchor=tk.W, pady=(10, 24))
+        roadmap = tk.Frame(
+            content, background=UI_CONTROL, padx=18, pady=16,
+            highlightthickness=1, highlightbackground=UI_BORDER,
+        )
+        roadmap.pack(fill=tk.X)
+        tk.Label(
+            roadmap,
+            text="PLANNED\nBrowse audio assets  |  Preview tracks  |  Export  |  Replace  |  Validate ROM format",
+            background=UI_CONTROL, foreground=UI_GREEN, font=("Consolas", 9, "bold"),
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
 
     def append_log(self, text: str) -> None:
         self.log.configure(state=tk.NORMAL)
@@ -352,10 +791,8 @@ class TranslatorApp(tk.Tk):
             self.refresh_texts()
             self.refresh_images()
             self.status_var.set(f"Loaded {self.profile.title}: {len(self.entries)} strings, {len(self.images)} images")
-            project_label = self.project_path.name if self.project_path else "unsaved ROM session"
             code = bytes(self.rom.idCode).decode("ascii", errors="replace")
-            self.session_var.set(f"Current ROM: {path.name}  |  Game: {self.profile.title} [{code}]  |  "
-                                 f"Project: {project_label}")
+            self.session_var.set("Original ROM loaded")
             self.title(f"{APP_NAME} - {self.profile.title} [{code}]")
             self.append_log(f"Opened {path}\nSHA-256: {digest}\nFound {len(self.entries)} text slots and "
                             f"{len(self.images)} CHBG images.")
@@ -590,6 +1027,36 @@ class TranslatorApp(tk.Tk):
         index = int(selection[0])
         return self.filtered_entries[index] if index < len(self.filtered_entries) else None
 
+    def _text_tree_hover(self, event) -> None:
+        is_japanese = bool(
+            self.text_tree.identify_row(event.y)
+            and self.text_tree.identify_column(event.x) == "#2"
+        )
+        self.text_tree.configure(cursor="hand2" if is_japanese else "")
+
+    def _text_tree_clicked(self, event):
+        row = self.text_tree.identify_row(event.y)
+        column = self.text_tree.identify_column(event.x)
+        if not row or column != "#2":
+            return None
+        self.text_tree.selection_set(row)
+        self.text_tree.focus(row)
+        self._text_selected()
+        try:
+            self.japanese_text_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.japanese_text_menu.grab_release()
+        return "break"
+
+    def _copy_selected_japanese(self) -> None:
+        entry = self._selected_entry()
+        if not entry:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(entry.original)
+        self.update_idletasks()
+        self.status_var.set("Copied Japanese text to the clipboard.")
+
     def _text_selected(self, _event=None) -> None:
         entry = self._selected_entry()
         if not entry:
@@ -686,17 +1153,32 @@ class TranslatorApp(tk.Tk):
         else:
             messagebox.showinfo(APP_NAME, "No offline suggestion is available. Use Auto Translate All (Online).")
 
+    def _target_language_code(self) -> str:
+        return TRANSLATION_LANGUAGES.get(self.target_language_var.get(), "en")
+
+    def _translation_language_changed(self, _event=None) -> None:
+        code = self._target_language_code()
+        self.session_settings["translation_language"] = code
+        self._persist_session_settings()
+        self.status_var.set(f"Google Translate target set to {self.target_language_var.get()}.")
+
     def quick_auto(self, silent: bool = False) -> None:
         if not self.entries:
             if not silent:
                 messagebox.showinfo(APP_NAME, "Open a ROM first.")
             return
-        completed, _ = auto_translate_entries(self.entries, online=False)
-        self.refresh_texts()
-        if not silent:
-            self.status_var.set(f"Added {completed} safe offline translations.")
+        if silent:
+            completed, _ = auto_translate_entries(
+                self.entries, online=False, target_language=self._target_language_code(),
+            )
+            self.refresh_texts()
+            return
+        self._start_auto_translation(require_confirmation=False)
 
     def online_auto(self) -> None:
+        self._start_auto_translation(require_confirmation=True)
+
+    def _start_auto_translation(self, require_confirmation: bool) -> None:
         if not self.entries:
             messagebox.showinfo(APP_NAME, "Open a ROM first.")
             return
@@ -704,24 +1186,38 @@ class TranslatorApp(tk.Tk):
         if not pending:
             messagebox.showinfo(APP_NAME, "Every extracted string already has a translation.")
             return
-        if not messagebox.askyesno(APP_NAME, f"Translate and aggressively shorten {len(pending)} pending strings?\n\n"
-                                            "The tool will reduce sentences to short UI labels and RPG-style "
-                                            "codes where space is extremely tight. Required tokens and negative "
-                                            "meaning are preserved. Review auto translations before release."):
-            return
+        language_name = self.target_language_var.get()
+        target_language = self._target_language_code()
+        if require_confirmation:
+            if not messagebox.askyesno(
+                APP_NAME,
+                f"Translate and aggressively shorten {len(pending)} pending strings to "
+                f"{language_name}?\n\nThe tool will reduce sentences to short UI labels and "
+                "RPG-style codes where space is extremely tight. Required tokens and negative "
+                "meaning are preserved. Review auto translations before release.",
+            ):
+                return
 
         def progress(current, total):
             self.worker_queue.put(("progress", current, total, f"Auto translating {current}/{total}..."))
 
         def task():
-            return auto_translate_entries(pending, progress=progress, online=True)
+            return auto_translate_entries(
+                pending, progress=progress, online=True, target_language=target_language,
+            )
 
         def done(result):
             completed, skipped = result
             self.refresh_texts()
-            self.status_var.set(f"Auto translation complete: {completed} added, {skipped} need manual editing.")
-            self.append_log(f"Online auto translation added {completed} fitted strings; {skipped} did not fit.")
-        self.status_var.set("Starting online translation...")
+            self.status_var.set(
+                f"{language_name} auto translation complete: {completed} added, "
+                f"{skipped} need manual editing."
+            )
+            self.append_log(
+                f"Google Translate ({target_language}) added {completed} fitted strings; "
+                f"{skipped} did not fit."
+            )
+        self.status_var.set(f"Starting Google Translate to {language_name}...")
         self._run_worker(task, done)
 
     def refresh_images(self) -> None:
@@ -964,7 +1460,7 @@ class TranslatorApp(tk.Tk):
                                 f"as {EMBEDDED_PROJECT_ROM_PATH}; cold-boot installer enabled."
                                 if embedded_project else ""
                             ))
-            self.tabs.select(self.log_tab)
+            self.show_page("compile")
             mode = "Direct-boot ROM" if embedded_project else "ROM"
             messagebox.showinfo(
                 APP_NAME,

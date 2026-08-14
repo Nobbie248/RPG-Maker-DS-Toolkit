@@ -44,14 +44,20 @@ modified dump, or damaged file should not be used.
 ## Using the Windows editor
 
 1. Run `dist\RPG Maker DS Toolkit.exe`.
-2. Select **Open ROM** and choose a supported clean Japanese ROM.
-3. Use **Quick Auto** to apply the built-in interface glossary.
-4. Optionally use **Auto Translate + Shorten (Online)** for untranslated text.
-5. Review the results in the **Text** tab and correct them in game context.
-6. Use the **Images** tab to export, edit, and re-import graphical assets. It exposes
+2. Use the compact navigation tabs for **File**, **Text**, **Graphics**,
+   **Compile**, **Direct Boot**, and **Music / SFX**. The most recent valid
+   project or ROM is reopened automatically.
+3. Open **File**, select **Open Original ROM**, and choose a supported
+   clean Japanese ROM when starting new work.
+4. Open **Text** and use **Quick Auto** to apply the built-in interface glossary.
+5. Choose a Google Translate target language, then optionally use **Auto
+   Translate** or **Auto Translate + Shorten** for untranslated text.
+6. Review the results in the **Text** workspace and correct them in game context.
+7. Use **Graphics** to export, edit, and re-import graphical assets. It exposes
    tiled `CHBG` atlases and fixed-size `BMBG` bitmaps such as `edit/ep67.blz`.
-7. Select **Save Project** to preserve the translation work.
-8. Select **Compile ROM** to create a separate test ROM.
+8. Return to **File** and select **Save Toolkit Project** to preserve
+   the translation work.
+9. Open **Compile ROM** to create a separate test ROM.
 
 For DS+, **Build Direct-Boot ROM from Save** reads the four created-game slots
 from a raw `.sav` or DeSmuME `.dsv`. Only populated slots with matching redundant
@@ -124,21 +130,55 @@ highlighted graphics, and less frequently used menus.
 
 Requirements:
 
-- Windows 10 or later
 - Python 3.12 or a compatible Python 3 release
+- Tkinter (included with standard Windows Python; on Linux, install your
+  distribution's Tk package, such as `python3-tk`)
 
-Run:
+### Windows
+
+From PowerShell in the repository root:
 
 ```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
-The build script creates a local virtual environment, installs the dependencies,
-and replaces:
+The Windows build script installs the required packages, removes its temporary
+PyInstaller files, and replaces the existing application at:
 
 ```text
 dist\RPG Maker DS Toolkit.exe
 ```
+
+### Linux
+
+Install Python, venv, and Tk using your distribution's package manager first.
+For Debian or Ubuntu:
+
+```bash
+sudo apt install python3 python3-venv python3-tk
+```
+
+Then, from a terminal in the repository root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt pyinstaller
+python -m PyInstaller --noconfirm --clean --onefile --windowed \
+  --name "RPG Maker DS Toolkit" --distpath dist --workpath build rpgds_gui.py
+rm -rf build "RPG Maker DS Toolkit.spec"
+```
+
+The native Linux executable is created at:
+
+```text
+dist/RPG Maker DS Toolkit
+```
+
+PyInstaller produces an executable for the operating system on which it runs;
+the Linux command does not produce a Windows `.exe`.
 
 The command-line `rpgds_text.py` extractor is also available for CSV-based
 workflows.

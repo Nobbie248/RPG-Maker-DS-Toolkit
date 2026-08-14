@@ -60,8 +60,7 @@ class GUIBuildModeTests(unittest.TestCase):
             profile=SimpleNamespace(game_code=b"VEBJ"),
             worker_queue=queue.Queue(),
             status_var=_Value(),
-            tabs=SimpleNamespace(select=lambda *_args: None),
-            log_tab=object(),
+            show_page=lambda *_args: None,
             append_log=logs.append,
         )
         fake._run_worker = lambda task, done: done(task())

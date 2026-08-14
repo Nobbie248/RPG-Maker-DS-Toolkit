@@ -1810,12 +1810,17 @@ def quick_translation(entry: TextEntry) -> str:
     return ""
 
 
-def _translate_request(strings: list[str], timeout: int = 20) -> list[str]:
+def _translate_request(strings: list[str], target_language: str = "en",
+                       timeout: int = 20) -> list[str]:
     # Newlines delimit requests in this unofficial endpoint. Flatten embedded
     # game line breaks so each source string still maps to exactly one result.
     query = "\n".join(re.sub(r"[\r\n]+", " ", text) for text in strings)
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?", target_language):
+        raise ValueError(f"Unsupported Google Translate target language: {target_language}")
     url = (
-        "https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=en&dt=t&q="
+        "https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl="
+        + urllib.parse.quote(target_language)
+        + "&dt=t&q="
         + urllib.parse.quote(query)
     )
     request = urllib.request.Request(url, headers={"User-Agent": "RPGDS-Translator/1.0"})
@@ -1837,17 +1842,19 @@ def _online_candidate(text: str) -> bool:
 
 
 def auto_translate_entries(entries: Iterable[TextEntry], progress: Callable[[int, int], None] | None = None,
-                           online: bool = True, batch_size: int = 12) -> tuple[int, int]:
+                           online: bool = True, batch_size: int = 12,
+                           target_language: str = "en") -> tuple[int, int]:
     pending = [entry for entry in entries if not entry.translation]
     completed = 0
     skipped = 0
-    for entry in pending:
-        suggestion = quick_translation(entry)
-        if suggestion:
-            wrapped = wrap_help_box_translation(entry.original, suggestion)
-            entry.translation = repair_entry_translation(entry, wrapped)
-            entry.auto = True
-            completed += 1
+    if target_language == "en":
+        for entry in pending:
+            suggestion = quick_translation(entry)
+            if suggestion:
+                wrapped = wrap_help_box_translation(entry.original, suggestion)
+                entry.translation = repair_entry_translation(entry, wrapped)
+                entry.auto = True
+                completed += 1
     remaining = [entry for entry in pending if not entry.translation]
     if not online:
         return completed, len(remaining)
@@ -1867,12 +1874,12 @@ def auto_translate_entries(entries: Iterable[TextEntry], progress: Callable[[int
             for original in batch
         ]
         try:
-            results = _translate_request(request_texts)
+            results = _translate_request(request_texts, target_language)
         except Exception:
             results = []
             for original, request_text in zip(batch, request_texts):
                 try:
-                    results.extend(_translate_request([request_text]))
+                    results.extend(_translate_request([request_text], target_language))
                 except Exception:
                     results.append("")
         for original, result in zip(batch, results):

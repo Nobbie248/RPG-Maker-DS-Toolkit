@@ -25,6 +25,33 @@ class GUISettingsTests(unittest.TestCase):
             self.assertEqual(actual, expected)
             self.assertEqual(json.loads(current_path.read_text(encoding="utf-8")), expected)
 
+    def test_page_navigation_raises_page_and_updates_title(self) -> None:
+        class Page:
+            raised = False
+
+            def tkraise(self) -> None:
+                self.raised = True
+
+        class Value:
+            value = ""
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+        page = Page()
+        title = Value()
+        app = SimpleNamespace(pages={"graphics": page}, page_title_var=title)
+
+        rpgds_gui.TranslatorApp.show_page(app, "graphics")
+
+        self.assertTrue(page.raised)
+        self.assertEqual(title.value, "Graphics Studio")
+
+    def test_selected_translation_language_maps_to_google_code(self) -> None:
+        app = SimpleNamespace(target_language_var=SimpleNamespace(get=lambda: "Spanish"))
+
+        self.assertEqual(rpgds_gui.TranslatorApp._target_language_code(app), "es")
+
 
 if __name__ == "__main__":
     unittest.main()
