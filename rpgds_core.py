@@ -82,15 +82,19 @@ DS_PLUS_DIRECT_BOOT_TRAMPOLINE = bytes.fromhex(
 # This one deliberately narrow patch replaces the top-level call that enters
 # the entire logo/title flow.  The trampoline branches directly into the
 # original Play Game continuation after installing and selecting project slot
-# 1.  The title, menu, and picker functions remain byte-identical but become
-# unreachable on this embedded-project boot path.
+# 1.  The title and menu functions remain byte-identical but become unreachable
+# on this embedded-project boot path.  The project selector enters its original
+# activation handler before it allocates or draws the picker UI.
 DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
     (0x02072D4C, 0xEB0007D0, 0),  # title-sequence call -> direct branch
-    # Once the original selector object has prepared slot 1, skip its input
-    # poll and take the ordinary acceptance path.  This is not a key press and
-    # happens before a selector frame can be presented.
-    (0x020553A4, 0xE3E09000, 0xE1A06007),
-    (0x020553A8, 0xEBFEDF46, 0xEA000080),
+    # Immediately after the selector function's prologue, choose the first
+    # slot and enter its ordinary acceptance path.  Branching here prevents
+    # the picker graphics, frame update, and input loop from ever being made.
+    (0x02055238, 0xE59A1004, 0xE3A05000),  # mov r5, #0
+    (0x0205523C, 0xE3A05000, 0xE3A06000),  # mov r6, #0
+    (0x02055240, 0xE3510000, 0xE3A07000),  # mov r7, #0
+    (0x02055244, 0xBA000004, 0xE58A7080),  # str r7, [sl, #0x80]
+    (0x02055248, 0xE3510002, 0xEA0000D8),  # b 0x020555B0
 )
 DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES = ()
 

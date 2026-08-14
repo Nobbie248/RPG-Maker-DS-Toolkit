@@ -139,8 +139,8 @@ class EmbeddedProjectTests(unittest.TestCase):
         arm9 = ndspy.codeCompression.decompress(bytes(rom.arm9))
         base = rom.arm9RamAddress
         # The title-sequence call is replaced, while the title and main-menu
-        # input loops remain completely unmodified.  The selector's input poll
-        # alone branches into its original project-activation path.
+        # input loops remain completely unmodified.  The selector branches
+        # into its original project-activation path before drawing its UI.
         self.assertEqual(
             struct.unpack_from("<I", arm9, 0x02072D4C - base)[0], 0xEB00FFB8,
         )
@@ -152,11 +152,21 @@ class EmbeddedProjectTests(unittest.TestCase):
             (0x02075338, 0xEBFE5F62),
         ):
             self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], clean_word)
+        for address, patched_word in (
+            (0x02055238, 0xE3A05000),
+            (0x0205523C, 0xE3A06000),
+            (0x02055240, 0xE3A07000),
+            (0x02055244, 0xE58A7080),
+            (0x02055248, 0xEA0000D8),
+        ):
+            self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], patched_word)
+        # The former late bypass is gone: the picker input poll remains clean
+        # and is unreachable on direct boot.
         self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x020553A4 - base)[0], 0xE1A06007,
+            struct.unpack_from("<I", arm9, 0x020553A4 - base)[0], 0xE3E09000,
         )
         self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x020553A8 - base)[0], 0xEA000080,
+            struct.unpack_from("<I", arm9, 0x020553A8 - base)[0], 0xEBFEDF46,
         )
         overlays = rom.loadArm9Overlays()
         overlay = overlays[DS_PLUS_DIRECT_BOOT_OVERLAY]
