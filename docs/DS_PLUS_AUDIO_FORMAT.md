@@ -68,14 +68,21 @@ about 0.249 seconds long.
 The toolkit converts SSEQ into Standard MIDI for editing. MIDI import converts
 up to 16 tracks back to SSEQ and asks which existing instrument slot in the
 selected track's SBNK each MIDI track should use. The import setup also exposes
-per-track volume and the MIDI's detected tempo; changing the tempo overrides
-the MIDI tempo events in the generated SSEQ. MIDI cannot represent every
-Nintendo-specific event, so complex controller behavior and loop boundaries
-may be simplified by a round trip.
+per-track volume, the MIDI's detected tempo, and editable loop start/end times.
+Changing the tempo overrides the MIDI tempo events in the generated SSEQ. Loop
+times are converted through the MIDI tempo map and written as genuine backward
+SSEQ jump commands on every generated track, so the compiled ROM uses the same
+intro-once/loop-region behavior as native DS music. MIDI cannot represent every
+Nintendo-specific event, so other complex controller behavior may still be
+simplified by a round trip.
 
 The MIDI setup window can render the current choices before committing them.
-Both this preview and normal BGM/BGS/ME playback repeat continuously until the
-user presses **Stop**. Sound-effect previews remain one-shot.
+**Preview Full MIDI** repeats the complete imported file, while **Preview Loop**
+plays the intro once and then repeats only the chosen loop region until the user
+presses **Stop**. Native
+BGM/BGS/ME preview detects and displays the original SSEQ jump boundary and
+uses it the same way. A track without an embedded loop repeats in full.
+Sound-effect previews remain one-shot.
 
 For an SSAR sound effect, **Import WAV** follows the sequence's instrument and
 note to its exact SBNK -> SWAR -> SWAV target. DS+ has one unique sample target

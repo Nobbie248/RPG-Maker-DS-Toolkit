@@ -54,11 +54,18 @@ from rpgds_audio import (
     effect_sample_target,
     list_audio_assets,
     midi_to_sequence,
+    midi_loop_ticks,
+    midi_tick_to_time,
+    midi_time_to_tick,
     midi_track_names,
+    format_audio_time,
+    parse_audio_time,
     play_pcm_bytes,
     render_sequence_ncsf_pcm,
     safe_filename,
     sequence_for_asset,
+    sequence_duration_seconds,
+    sequence_loop_times,
     sequence_to_midi,
     stop_audio,
     wav_bytes_to_swav,
@@ -790,10 +797,15 @@ class TranslatorApp(tk.Tk):
         sample_count = sum(len(self.sdat.waveArchives[index][1].waves)
                            for index in wave_ids if index is not None)
         self.audio_title.set(f"{asset.name}  ({asset.kind.upper()})")
+        sequence = self._selected_audio_sequence()
+        loop_times = sequence_loop_times(sequence)
+        loop_text = (f"  |  Loop {format_audio_time(loop_times[0])} → "
+                     f"{format_audio_time(loop_times[1])}" if loop_times else
+                     "  |  No embedded loop")
         self.audio_info.set(
             f"Sequence ID {asset.index}  |  Bank {asset.bank_id}  |  "
             f"{len(bank.instruments)} instrument slots  |  {sample_count} ADPCM samples  |  "
-            f"Player {asset.player_id}  |  Archive volume {asset.volume}"
+            f"Player {asset.player_id}  |  Archive volume {asset.volume}{loop_text}"
         )
         self.audio_note.set(
             "Replacement loaded; previews and compiled ROMs use it."
@@ -834,20 +846,31 @@ class TranslatorApp(tk.Tk):
         asset = self.current_audio
         def task():
             sequence = self._selected_audio_sequence()
-            duration = 8.0 if asset.kind in {"se", "me"} else 30.0
-            return render_sequence_ncsf_pcm(
+            if asset.kind == "se":
+                duration = 8.0
+                loop_times = None
+            else:
+                duration = sequence_duration_seconds(sequence)
+                loop_times = sequence_loop_times(sequence)
+            rendered = render_sequence_ncsf_pcm(
                 self.sdat, asset, sequence, duration,
                 sample_replacements=self.sample_replacements,
             )
+            return rendered, loop_times, duration
         def done(result):
-            pcm, sample_rate = result
+            (pcm, sample_rate), loop_times, duration = result
             try:
-                play_pcm_bytes(pcm, sample_rate, loop=asset.kind != "se")
+                play_pcm_bytes(
+                    pcm, sample_rate, loop=asset.kind != "se",
+                    loop_start_seconds=(loop_times[0] if loop_times else 0.0),
+                    loop_end_seconds=(loop_times[1] if loop_times else duration),
+                )
             except Exception as exc:
                 messagebox.showerror(APP_NAME, f"Audio output failed:\n{exc}")
                 return
             self.status_var.set(f"Playing {asset.name}")
-            behavior = "looping" if asset.kind != "se" else "one-shot"
+            behavior = ("intro once, then its embedded loop" if loop_times else
+                        "full track looping" if asset.kind != "se" else "one-shot")
             self.audio_note.set(
                 f"Playing {behavior} with the in_ncsf / FeOS DS audio engine; no WAV file created."
             )
@@ -897,6 +920,31 @@ class TranslatorApp(tk.Tk):
                    buttonbackground=UI_CONTROL).pack(side=tk.LEFT)
         tk.Label(tempo_row, text="The MIDI's detected tempo is used by default.",
                  background=UI_PANEL, foreground=UI_MUTED).pack(side=tk.LEFT, padx=12)
+        duration = max(0.001, float(midi.length))
+        source_loop = midi_loop_ticks(midi)
+        default_loop_start = (midi_tick_to_time(midi, source_loop[0])
+                              if source_loop else 0.0)
+        default_loop_end = (midi_tick_to_time(midi, source_loop[1])
+                            if source_loop else duration)
+        loop_row = tk.Frame(body, background=UI_PANEL)
+        loop_row.pack(fill=tk.X, pady=(0, 10))
+        loop_enabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(loop_row, text="Loop enabled", variable=loop_enabled).pack(side=tk.LEFT)
+        tk.Label(loop_row, text="Start", background=UI_PANEL,
+                 foreground=UI_TEXT).pack(side=tk.LEFT, padx=(18, 5))
+        loop_start = tk.StringVar(value=format_audio_time(default_loop_start))
+        tk.Entry(loop_row, textvariable=loop_start, width=10,
+                 background=UI_CONTROL, foreground=UI_TEXT,
+                 insertbackground=UI_TEXT).pack(side=tk.LEFT)
+        tk.Label(loop_row, text="End", background=UI_PANEL,
+                 foreground=UI_TEXT).pack(side=tk.LEFT, padx=(12, 5))
+        loop_end = tk.StringVar(value=format_audio_time(default_loop_end))
+        tk.Entry(loop_row, textvariable=loop_end, width=10,
+                 background=UI_CONTROL, foreground=UI_TEXT,
+                 insertbackground=UI_TEXT).pack(side=tk.LEFT)
+        source_note = ("markers detected" if source_loop else "full track default")
+        tk.Label(loop_row, text=f"Full MIDI: {format_audio_time(duration)} · {source_note}",
+                 background=UI_PANEL, foreground=UI_MUTED).pack(side=tk.LEFT, padx=14)
         instrument_labels = []
         for index, instrument in enumerate(bank.instruments):
             if instrument is not None:
@@ -930,37 +978,70 @@ class TranslatorApp(tk.Tk):
                  foreground=UI_GREEN, anchor=tk.W).pack(fill=tk.X, pady=(10, 0))
 
         def current_options():
+            start_seconds = parse_audio_time(loop_start.get())
+            end_seconds = parse_audio_time(loop_end.get())
+            enabled = bool(loop_enabled.get())
+            if enabled and not (0 <= start_seconds < end_seconds <= duration + 0.001):
+                raise ValueError(
+                    f"Loop must satisfy 0 ≤ start < end ≤ {format_audio_time(duration)}"
+                )
             return {
                 "instruments": [int(variable.get().split()[0]) for variable in variables],
                 "volumes": [max(0, min(127, int(variable.get())))
                             for variable in volume_variables],
                 "tempo": max(20, min(400, int(tempo_variable.get()))),
+                "loop_enabled": enabled,
+                "loop_start_seconds": start_seconds,
+                "loop_end_seconds": end_seconds,
+                "loop_start_tick": midi_time_to_tick(midi, start_seconds) if enabled else None,
+                "loop_end_tick": midi_time_to_tick(midi, end_seconds) if enabled else None,
             }
 
         def accept():
-            result.update(current_options())
+            try:
+                result.update(current_options())
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, str(exc), parent=dialog)
+                return
             stop_audio()
             dialog.destroy()
 
-        def preview():
-            options = current_options()
+        def preview(preview_loop: bool):
+            try:
+                options = current_options()
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, str(exc), parent=dialog)
+                return
             original = sequence_for_asset(self.sdat, self.current_audio)
             preview_status.set("Rendering this MIDI with the selected DS instruments...")
             def task():
                 replacement = midi_to_sequence(
                     midi, options["instruments"], original,
                     options["volumes"], options["tempo"],
+                    (options["loop_start_tick"] if preview_loop else None),
+                    (options["loop_end_tick"] if preview_loop else None),
                 )
-                return render_sequence_ncsf_pcm(
-                    self.sdat, self.current_audio, replacement, 30.0,
+                actual_loop = sequence_loop_times(replacement)
+                render_duration = sequence_duration_seconds(replacement)
+                rendered = render_sequence_ncsf_pcm(
+                    self.sdat, self.current_audio, replacement, render_duration,
                     sample_replacements=self.sample_replacements,
                 )
+                return rendered, actual_loop, render_duration
             def done(rendered):
                 if not dialog.winfo_exists():
                     return
-                pcm, sample_rate = rendered
-                play_pcm_bytes(pcm, sample_rate, loop=True)
-                preview_status.set("Preview playing on loop. Change settings and press Preview again.")
+                (pcm, sample_rate), actual_loop, render_duration = rendered
+                play_pcm_bytes(
+                    pcm, sample_rate, loop=True,
+                    loop_start_seconds=(actual_loop[0] if actual_loop else 0.0),
+                    loop_end_seconds=(actual_loop[1] if actual_loop else render_duration),
+                )
+                message = (f"Playing intro once, then loop "
+                           f"{format_audio_time(actual_loop[0])} → "
+                           f"{format_audio_time(actual_loop[1])}." if actual_loop else
+                           "Playing the complete imported MIDI on loop.")
+                preview_status.set(message)
             self._run_worker(task, done)
 
         def close_dialog():
@@ -973,8 +1054,10 @@ class TranslatorApp(tk.Tk):
                    style="Primary.TButton").pack(side=tk.RIGHT)
         ttk.Button(buttons, text="Cancel", command=close_dialog).pack(side=tk.RIGHT, padx=8)
         ttk.Button(buttons, text="Stop", command=stop_audio).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(buttons, text="Preview", command=preview,
+        ttk.Button(buttons, text="Preview Loop", command=lambda: preview(True),
                    style="Primary.TButton").pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Preview Full MIDI", command=lambda: preview(False)).pack(
+            side=tk.LEFT, padx=(8, 0))
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
         self.wait_window(dialog)
         return result or None
@@ -1003,6 +1086,7 @@ class TranslatorApp(tk.Tk):
             replacement = midi_to_sequence(
                 midi, options["instruments"], original,
                 options["volumes"], options["tempo"],
+                options["loop_start_tick"], options["loop_end_tick"],
             )
             raw = bytes(replacement.save()[0])
             # Reparse now so malformed event graphs are rejected before saving/building.
@@ -1145,7 +1229,9 @@ class TranslatorApp(tk.Tk):
             self.image_pngs = dict(saved_images or {})
             self.audio_replacements = dict(saved_audio or {})
             self.sample_replacements = dict(saved_audio_samples or {})
-            self.sdat = ndspy.soundArchive.SDAT(bytes(self.rom.getFileByName(SDAT_ROM_PATH)))
+            source_sdat = bytes(self.rom.getFileByName(SDAT_ROM_PATH))
+            self.sdat = ndspy.soundArchive.SDAT(source_sdat)
+            self.sdat._rpgds_source_data = source_sdat
             self.audio_assets = list_audio_assets(self.sdat)
             if saved_rows:
                 for entry in self.entries:

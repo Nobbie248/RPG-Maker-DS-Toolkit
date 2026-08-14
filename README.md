@@ -29,7 +29,7 @@ formats.
 - Browses and previews all 40 BGM, 10 ambience, 10 musical-event, and 136
   sound-effect sequences using the ROM's native Nintendo DS ADPCM instruments.
 - Exports MIDI or the complete SSEQ/SBNK/SWAR/SWAV sound library, and imports
-  MIDI with per-track DS instrument assignment.
+  MIDI with per-track DS instruments, volume, tempo, and real SSEQ loop points.
 - Reads RPG Tsukuru DS+ `.sav` and DeSmuME `.dsv` files, validates their four
   mirrored created-game slots, and builds a one-time direct-boot ROM from the
   selected project without changing the saved toolkit project.
@@ -61,8 +61,9 @@ modified dump, or damaged file should not be used.
 8. Use **Music / SFX** to preview native tracks, import MIDI with per-track DS
    instrument/volume and tempo setup, import ordinary WAV files as replacement
    sound effects, or extract the complete sound-bank library.
-   Music previews loop until **Stop** is pressed, and the MIDI setup dialog can
-   preview the current instrument, volume, and tempo choices before import.
+   Music previews loop until **Stop** is pressed. The MIDI setup dialog can
+   separately preview the complete MIDI or play its intro once and repeat the
+   editable loop section with the current instrument, volume, and tempo choices.
 9. Return to **File** and select **Save Toolkit Project** to preserve
    the translation work.
 10. Open **Compile ROM** to create a separate test ROM.

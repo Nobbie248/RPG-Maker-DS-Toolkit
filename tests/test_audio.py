@@ -20,10 +20,18 @@ from rpgds_audio import (
     _swav_base_rate,
     _swav_loop_start_samples,
     _decode_swav,
+    _private_sdat,
     midi_to_sequence,
+    midi_loop_ticks,
+    midi_tick_to_time,
+    midi_time_to_tick,
+    format_audio_time,
+    parse_audio_time,
     render_sequence_pcm,
     render_sequence_wav,
     sequence_to_midi,
+    sequence_loop_ticks,
+    sequence_loop_times,
     wav_bytes_to_swav,
 )
 from rpgds_core import (load_project, load_project_audio,
@@ -88,6 +96,14 @@ class AudioConversionTests(unittest.TestCase):
             self.assertEqual((rows, images, embedded), ({}, {}, None))
             self.assertEqual(load_project_audio(project), {"bgm:0": replacement})
 
+    def test_preview_clone_uses_untouched_sdat_bytes_after_sequence_browsing(self):
+        loaded = SimpleNamespace(_rpgds_source_data=b"original SDAT bytes")
+        private = object()
+        with mock.patch("rpgds_audio.ndspy.soundArchive.SDAT",
+                        return_value=private) as constructor:
+            self.assertIs(_private_sdat(loaded), private)
+        constructor.assert_called_once_with(b"original SDAT bytes")
+
     def test_project_round_trips_swav_replacement(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -132,6 +148,68 @@ class AudioConversionTests(unittest.TestCase):
         self.assertTrue(any(isinstance(event, ndspy.soundSequence.TempoSequenceEvent)
                             and event.value == 140 for event in converted.events))
 
+    def test_audio_time_text_round_trip(self):
+        self.assertEqual(format_audio_time(83.5), "1:23.500")
+        self.assertAlmostEqual(parse_audio_time("1:23.500"), 83.5)
+        self.assertAlmostEqual(parse_audio_time("2.25"), 2.25)
+        with self.assertRaises(ValueError):
+            parse_audio_time("not a time")
+
+    def test_midi_time_to_tick_follows_tempo_changes(self):
+        midi = mido.MidiFile(ticks_per_beat=480)
+        track = mido.MidiTrack([
+            mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(120), time=0),
+            mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(60), time=480),
+            mido.MetaMessage("end_of_track", time=480),
+        ])
+        midi.tracks.append(track)
+        self.assertEqual(midi_time_to_tick(midi, 0.5), 480)
+        self.assertEqual(midi_time_to_tick(midi, 1.5), 960)
+
+    def test_midi_loop_is_embedded_as_backward_sseq_jump(self):
+        midi = mido.MidiFile(ticks_per_beat=480)
+        for note in (60, 67):
+            midi.tracks.append(mido.MidiTrack([
+                mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(120), time=0),
+                mido.Message("note_on", note=note, velocity=100, time=0),
+                mido.Message("note_off", note=note, velocity=0, time=480),
+                mido.Message("note_on", note=note + 2, velocity=100, time=480),
+                mido.Message("note_off", note=note + 2, velocity=0, time=480),
+            ]))
+        converted = midi_to_sequence(
+            midi, [1, 2], self._base_sequence(), [100, 100], 120,
+            loop_start_tick=480, loop_end_tick=1440,
+        )
+        raw = bytes(converted.save()[0])
+        reparsed = ndspy.soundSequence.SSEQ(
+            raw, converted.unk02, converted.bankID, converted.volume,
+            converted.channelPressure, converted.polyphonicPressure,
+            converted.playerID,
+        )
+        reparsed.parse()
+        jumps = [event for event in reparsed.events
+                 if isinstance(event, ndspy.soundSequence.JumpSequenceEvent)]
+        self.assertEqual(len(jumps), 2)
+        self.assertEqual(sequence_loop_ticks(reparsed), (48, 144))
+        self.assertEqual(sequence_loop_times(reparsed), (0.5, 1.5))
+        exported = sequence_to_midi(reparsed)
+        self.assertEqual(midi_loop_ticks(exported), (48, 144))
+        self.assertAlmostEqual(midi_tick_to_time(exported, 144), 1.5)
+        self.assertAlmostEqual(exported.length, 1.5)
+
+    def test_midi_export_clips_sustained_note_at_sseq_loop_end(self):
+        loop_target = ndspy.soundSequence.NoteSequenceEvent(60, 100, 10000)
+        sequence = ndspy.soundSequence.SSEQ.fromEvents([
+            ndspy.soundSequence.TempoSequenceEvent(120),
+            ndspy.soundSequence.RestSequenceEvent(24),
+            loop_target,
+            ndspy.soundSequence.RestSequenceEvent(48),
+            ndspy.soundSequence.JumpSequenceEvent(loop_target),
+        ], bankID=0, playerID=1)
+        midi = sequence_to_midi(sequence)
+        self.assertEqual(midi_loop_ticks(midi), (24, 72))
+        self.assertAlmostEqual(midi.length, 0.75)
+
     def test_music_preview_requests_continuous_loop(self):
         channel = mock.Mock()
         sound = mock.Mock()
@@ -144,6 +222,38 @@ class AudioConversionTests(unittest.TestCase):
                 mock.patch.object(rpgds_audio, "_preview_channel", None):
             rpgds_audio.play_pcm_bytes(b"\0" * 16, 32768, loop=True)
         sound.play.assert_called_once_with(loops=-1)
+
+    def test_music_preview_plays_intro_then_only_selected_loop(self):
+        channel = mock.Mock()
+        intro_sound = mock.Mock()
+        loop_sound = mock.Mock()
+        intro_sound.play.return_value = channel
+        mixer = mock.Mock()
+        mixer.get_init.return_value = (10, -16, 2)
+        mixer.Sound.side_effect = [intro_sound, loop_sound]
+        pygame = SimpleNamespace(mixer=mixer)
+        timer = mock.Mock()
+        callbacks = []
+
+        def make_timer(delay, callback):
+            callbacks.append((delay, callback))
+            return timer
+
+        with mock.patch.dict(sys.modules, {"pygame": pygame}), \
+                mock.patch("rpgds_audio.threading.Timer", side_effect=make_timer), \
+                mock.patch.object(rpgds_audio, "_preview_channel", None), \
+                mock.patch.object(rpgds_audio, "_preview_timer", None):
+            # At 10 Hz stereo/16-bit, 400 bytes is ten seconds.  Play 0..8
+            # once, queue 2..8 gaplessly, then keep repeating 2..8.
+            rpgds_audio.play_pcm_bytes(
+                b"\0" * 400, 10, loop=True,
+                loop_start_seconds=2.0, loop_end_seconds=8.0,
+            )
+            intro_sound.play.assert_called_once_with(loops=0)
+            channel.queue.assert_called_once_with(loop_sound)
+            self.assertAlmostEqual(callbacks[0][0], 14.0)
+            callbacks[0][1]()
+            channel.play.assert_called_once_with(loop_sound, loops=-1)
 
     def test_native_preview_handles_one_sample_tail_note(self):
         definition = ndspy.soundBank.NoteDefinition(

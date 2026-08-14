@@ -16,6 +16,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,8 @@ import ndspy.soundWaveArchive
 
 _preview_sound = None
 _preview_channel = None
+_preview_loop_sound = None
+_preview_timer = None
 
 
 SDAT_ROM_PATH = "sound/sound_data.sdat"
@@ -60,6 +63,13 @@ def _ncsf_renderer_path() -> Path:
         "The accurate DS audio renderer is not installed. Run build_exe.ps1 "
         "(Windows) or build_linux.sh (Linux) to build it."
     )
+
+
+def _private_sdat(sdat):
+    """Clone an SDAT without re-saving SSEQ objects parsed by the UI."""
+    source_data = getattr(sdat, "_rpgds_source_data", None)
+    data = bytes(source_data) if source_data is not None else bytes(sdat.save())
+    return ndspy.soundArchive.SDAT(data)
 
 
 @dataclass(frozen=True)
@@ -112,7 +122,7 @@ def sequence_for_asset(sdat, asset: AudioAsset):
     return sdat.sequences[asset.index][1]
 
 
-def _event_tracks(sequence, max_ticks: int = TICKS_PER_BEAT * 60 * 8):
+def _event_tracks(sequence, max_ticks: int | None = None):
     """Return (track, absolute tick, event) while following calls and one loop."""
     sequence.parse()
     events = sequence.events
@@ -133,7 +143,8 @@ def _event_tracks(sequence, max_ticks: int = TICKS_PER_BEAT * 60 * 8):
         note_wait = False
         edge_visits: dict[tuple[int, int], int] = {}
         steps = 0
-        while 0 <= pc < len(events) and tick <= max_ticks and steps < 250000:
+        while (0 <= pc < len(events) and (max_ticks is None or tick <= max_ticks)
+               and steps < 250000):
             steps += 1
             event = events[pc]
             yield track_number, tick, event
@@ -169,11 +180,14 @@ def _event_tracks(sequence, max_ticks: int = TICKS_PER_BEAT * 60 * 8):
 
 def sequence_to_midi(sequence) -> mido.MidiFile:
     midi = mido.MidiFile(type=1, ticks_per_beat=TICKS_PER_BEAT)
+    loop_boundary = sequence_loop_ticks(sequence)
     grouped: dict[int, list[tuple[int, int, mido.Message | mido.MetaMessage]]] = {}
     order = 0
     track_transpose: dict[int, int] = {}
     track_bend_range: dict[int, int] = {}
     for track, tick, event in _event_tracks(sequence):
+        if loop_boundary is not None and tick >= loop_boundary[1]:
+            continue
         target = grouped.setdefault(track, [])
         channel = track & 0x0F
         if isinstance(event, ndspy.soundSequence.NoteSequenceEvent):
@@ -182,7 +196,10 @@ def sequence_to_midi(sequence) -> mido.MidiFile:
             target.append((tick, order, mido.Message(
                 "note_on", channel=channel, note=pitch, velocity=velocity)))
             order += 1
-            target.append((tick + max(1, event.duration), order,
+            note_end = tick + max(1, event.duration)
+            if loop_boundary is not None:
+                note_end = min(note_end, loop_boundary[1])
+            target.append((note_end, order,
                            mido.Message("note_off", channel=channel, note=pitch, velocity=0)))
         elif isinstance(event, ndspy.soundSequence.InstrumentSwitchSequenceEvent):
             target.append((tick, order, mido.Message(
@@ -226,6 +243,12 @@ def sequence_to_midi(sequence) -> mido.MidiFile:
             target.append((tick, order, mido.MetaMessage("set_tempo",
                                                          tempo=mido.bpm2tempo(bpm))))
         order += 1
+    if loop_boundary is not None:
+        target = grouped.setdefault(0, [])
+        target.append((loop_boundary[0], -2, mido.MetaMessage(
+            "marker", text="RPGDS_LOOP_START")))
+        target.append((loop_boundary[1], 2 ** 31, mido.MetaMessage(
+            "marker", text="RPGDS_LOOP_END")))
     for track_no in sorted(grouped):
         output = mido.MidiTrack()
         output.append(mido.MetaMessage("track_name", name=f"DS Track {track_no}", time=0))
@@ -250,9 +273,156 @@ def midi_track_names(midi: mido.MidiFile) -> list[str]:
     return names
 
 
+def format_audio_time(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    minutes, remainder = divmod(seconds, 60.0)
+    return f"{int(minutes)}:{remainder:06.3f}"
+
+
+def parse_audio_time(value: str) -> float:
+    text = value.strip()
+    try:
+        if ":" in text:
+            minutes, seconds = text.split(":", 1)
+            result = int(minutes) * 60.0 + float(seconds)
+        else:
+            result = float(text)
+    except ValueError as exc:
+        raise ValueError("Time must use M:SS.mmm, for example 1:23.500") from exc
+    if result < 0:
+        raise ValueError("Loop times cannot be negative")
+    return result
+
+
+def midi_time_to_tick(midi: mido.MidiFile, target_seconds: float) -> int:
+    """Convert wall-clock time to MIDI ticks while following tempo changes."""
+    target = max(0.0, float(target_seconds))
+    tempo = 500000
+    elapsed_seconds = 0.0
+    elapsed_ticks = 0
+    for message in mido.merge_tracks(midi.tracks):
+        delta_seconds = mido.tick2second(message.time, midi.ticks_per_beat, tempo)
+        if target <= elapsed_seconds + delta_seconds and delta_seconds > 0:
+            fraction = (target - elapsed_seconds) / delta_seconds
+            return max(0, round(elapsed_ticks + message.time * fraction))
+        elapsed_seconds += delta_seconds
+        elapsed_ticks += message.time
+        if message.type == "set_tempo":
+            tempo = message.tempo
+    if target > elapsed_seconds:
+        elapsed_ticks += round(mido.second2tick(
+            target - elapsed_seconds, midi.ticks_per_beat, tempo))
+    return max(0, elapsed_ticks)
+
+
+def midi_tick_to_time(midi: mido.MidiFile, target_tick: int) -> float:
+    """Convert an absolute MIDI tick to wall-clock seconds through its tempo map."""
+    target = max(0, int(target_tick))
+    tempo = 500000
+    elapsed_seconds = 0.0
+    elapsed_ticks = 0
+    for message in mido.merge_tracks(midi.tracks):
+        next_ticks = elapsed_ticks + message.time
+        if target <= next_ticks:
+            elapsed_seconds += mido.tick2second(
+                target - elapsed_ticks, midi.ticks_per_beat, tempo)
+            return elapsed_seconds
+        elapsed_seconds += mido.tick2second(message.time, midi.ticks_per_beat, tempo)
+        elapsed_ticks = next_ticks
+        if message.type == "set_tempo":
+            tempo = message.tempo
+    return elapsed_seconds + mido.tick2second(
+        target - elapsed_ticks, midi.ticks_per_beat, tempo)
+
+
+def midi_loop_ticks(midi: mido.MidiFile) -> tuple[int, int] | None:
+    """Read common MIDI loop markers, including markers exported by this toolkit."""
+    starts, ends = [], []
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type not in {"marker", "text", "cue_marker"}:
+                continue
+            name = re.sub(r"[^a-z0-9]", "", getattr(message, "text", "").lower())
+            if name in {"rpgdsloopstart", "loopstart", "loopbegin"}:
+                starts.append(tick)
+            elif name in {"rpgdsloopend", "loopend"}:
+                ends.append(tick)
+    if not starts or not ends:
+        return None
+    start = min(starts)
+    end = next((value for value in sorted(ends) if value > start), None)
+    return (start, end) if end is not None else None
+
+
+def sequence_loop_ticks(sequence) -> tuple[int, int] | None:
+    """Return the principal backward-jump loop as (start_tick, end_tick)."""
+    first_ticks: dict[tuple[int, int], int] = {}
+    loops: list[tuple[int, int, int]] = []
+    for track, tick, event in _event_tracks(sequence):
+        key = (track, id(event))
+        first_visit = key not in first_ticks
+        first_ticks.setdefault(key, tick)
+        if first_visit and isinstance(event, ndspy.soundSequence.JumpSequenceEvent):
+            start = first_ticks.get((track, id(event.destination)))
+            if start is not None and start < tick:
+                loops.append((track, start, tick))
+    if not loops:
+        return None
+    # Track 0 is the tempo/master track when it contains a loop.  Imported
+    # MIDI gives every track the same boundary, while original sequences may
+    # contain small local control loops on secondary tracks.
+    track_zero = [(start, end) for track, start, end in loops if track == 0]
+    candidates = track_zero or [(start, end) for _, start, end in loops]
+    counts: dict[tuple[int, int], int] = {}
+    for pair in candidates:
+        counts[pair] = counts.get(pair, 0) + 1
+    return max(counts, key=lambda pair: (counts[pair], pair[1] - pair[0]))
+
+
+def sequence_tick_to_seconds(sequence, target_tick: int) -> float:
+    """Convert an SSEQ tick to seconds using track 0's tempo map."""
+    target = max(0, int(target_tick))
+    tempo_events: dict[int, int] = {0: 120}
+    for track, tick, event in _event_tracks(sequence, max_ticks=max(target + 1, TICKS_PER_BEAT)):
+        if track == 0 and tick <= target and isinstance(
+                event, ndspy.soundSequence.TempoSequenceEvent):
+            tempo_events[tick] = max(1, int(event.value))
+    elapsed = 0.0
+    cursor = 0
+    bpm = 120
+    for tick in sorted(tempo_events):
+        if tick > target:
+            break
+        elapsed += (tick - cursor) * 60.0 / (TICKS_PER_BEAT * bpm)
+        cursor = tick
+        bpm = tempo_events[tick]
+    elapsed += (target - cursor) * 60.0 / (TICKS_PER_BEAT * bpm)
+    return elapsed
+
+
+def sequence_loop_times(sequence) -> tuple[float, float] | None:
+    loop = sequence_loop_ticks(sequence)
+    if loop is None:
+        return None
+    return (sequence_tick_to_seconds(sequence, loop[0]),
+            sequence_tick_to_seconds(sequence, loop[1]))
+
+
+def sequence_duration_seconds(sequence) -> float:
+    """Return one complete pass, ending at the first backward loop jump."""
+    loop = sequence_loop_ticks(sequence)
+    if loop is not None:
+        return sequence_tick_to_seconds(sequence, loop[1])
+    return max(0.05, float(sequence_to_midi(sequence).length))
+
+
 def midi_to_sequence(midi: mido.MidiFile, instrument_ids: list[int], base_sequence,
                      track_volumes: list[int] | None = None,
-                     tempo_bpm: int | None = None):
+                     tempo_bpm: int | None = None,
+                     loop_start_tick: int | None = None,
+                     loop_end_tick: int | None = None):
     """Convert MIDI tracks to an SSEQ while retaining the selected DS bank."""
     scale = TICKS_PER_BEAT / max(1, midi.ticks_per_beat)
     track_events: list[list] = []
@@ -277,8 +447,9 @@ def midi_to_sequence(midi: mido.MidiFile, instrument_ids: list[int], base_sequen
                 stack = notes.get(message.note)
                 if stack:
                     start, velocity = stack.pop(0)
+                    duration = max(1, tick - start)
                     timeline.append((start, ndspy.soundSequence.NoteSequenceEvent(
-                        message.note, velocity, max(1, tick - start))))
+                        message.note, velocity, duration)))
             elif message.type == "set_tempo" and tempo_bpm is None:
                 timeline.append((tick, ndspy.soundSequence.TempoSequenceEvent(
                     max(1, round(mido.tempo2bpm(message.tempo))))))
@@ -292,12 +463,46 @@ def midi_to_sequence(midi: mido.MidiFile, instrument_ids: list[int], base_sequen
                 timeline.append((start, ndspy.soundSequence.NoteSequenceEvent(
                     note, velocity, max(1, end_tick - start))))
         emitted, cursor = [], 0
+        scaled_loop_start = (max(0, round(loop_start_tick * scale))
+                             if loop_start_tick is not None else None)
+        scaled_loop_end = (max(0, round(loop_end_tick * scale))
+                           if loop_end_tick is not None else None)
+        looping = (scaled_loop_start is not None and scaled_loop_end is not None
+                   and scaled_loop_end > scaled_loop_start)
+        loop_target = None
+
+        def append_rest(target_tick: int):
+            nonlocal cursor, loop_target
+            if target_tick <= cursor:
+                return
+            if (looping and loop_target is None and
+                    cursor < scaled_loop_start < target_tick):
+                emitted.append(ndspy.soundSequence.RestSequenceEvent(
+                    scaled_loop_start - cursor))
+                cursor = scaled_loop_start
+            rest = ndspy.soundSequence.RestSequenceEvent(target_tick - cursor)
+            if looping and loop_target is None and cursor == scaled_loop_start:
+                loop_target = rest
+            emitted.append(rest)
+            cursor = target_tick
+
         for tick, event in sorted(timeline, key=lambda item: item[0]):
-            if tick > cursor:
-                emitted.append(ndspy.soundSequence.RestSequenceEvent(tick - cursor))
-                cursor = tick
+            if looping and tick >= scaled_loop_end:
+                continue
+            if (looping and isinstance(event, ndspy.soundSequence.NoteSequenceEvent)
+                    and tick + event.duration > scaled_loop_end):
+                event.duration = max(1, scaled_loop_end - tick)
+            append_rest(tick)
+            if looping and loop_target is None and tick == scaled_loop_start:
+                loop_target = event
             emitted.append(event)
-        emitted.append(ndspy.soundSequence.EndTrackSequenceEvent())
+        if looping:
+            append_rest(scaled_loop_end)
+            if loop_target is None:
+                raise ValueError("Loop start does not fall within this MIDI track")
+            emitted.append(ndspy.soundSequence.JumpSequenceEvent(loop_target))
+        else:
+            emitted.append(ndspy.soundSequence.EndTrackSequenceEvent())
         track_events.append(emitted)
     if not track_events:
         track_events = [[ndspy.soundSequence.EndTrackSequenceEvent()]]
@@ -675,7 +880,12 @@ def render_sequence_ncsf_pcm(sdat, asset: AudioAsset, sequence=None,
 
     # Reparse a private SDAT copy before replacing the selected SSEQ. This
     # avoids mutating the GUI's archive while its background worker renders.
-    archive = ndspy.soundArchive.SDAT(bytes(sdat.save()))
+    # Parsing an SSEQ resolves its branch targets into Python event objects.
+    # A few retail sequences contain targets inside raw command blocks that
+    # ndspy can read but cannot re-save by object identity.  Always clone the
+    # untouched SDAT bytes captured at ROM load when available; browsing loop
+    # information must never make a later preview fail with KeyError(event).
+    archive = _private_sdat(sdat)
     for key, raw_wave in (sample_replacements or {}).items():
         parts = key.split(":")
         if len(parts) != 3 or parts[0] != "swar":
@@ -719,9 +929,11 @@ def render_sequence_ncsf_pcm(sdat, asset: AudioAsset, sequence=None,
     return pcm, sample_rate
 
 
-def play_pcm_bytes(pcm: bytes, sample_rate: int = 32768, loop: bool = False) -> None:
-    """Play synthesized sequence output directly from memory, without WAV/MIDI files."""
-    global _preview_sound, _preview_channel
+def play_pcm_bytes(pcm: bytes, sample_rate: int = 32768, loop: bool = False,
+                   loop_start_seconds: float = 0.0,
+                   loop_end_seconds: float | None = None) -> None:
+    """Play PCM once, or play its intro once and repeat only its loop region."""
+    global _preview_sound, _preview_channel, _preview_loop_sound, _preview_timer
     # Delay pygame import until playback so command-line extraction remains
     # lightweight and Linux users without an audio device can still edit.
     import os
@@ -732,10 +944,44 @@ def play_pcm_bytes(pcm: bytes, sample_rate: int = 32768, loop: bool = False) -> 
         if pygame.mixer.get_init():
             pygame.mixer.quit()
         pygame.mixer.init(frequency=sample_rate, size=-16, channels=2, buffer=1024)
-    if _preview_channel is not None:
-        _preview_channel.stop()
-    _preview_sound = pygame.mixer.Sound(buffer=pcm)
-    _preview_channel = _preview_sound.play(loops=-1 if loop else 0)
+    stop_audio()
+    bytes_per_second = sample_rate * 4  # signed 16-bit stereo
+    available_seconds = len(pcm) / bytes_per_second
+    end_seconds = (available_seconds if loop_end_seconds is None else
+                   min(available_seconds, max(0.0, float(loop_end_seconds))))
+    start_seconds = min(end_seconds, max(0.0, float(loop_start_seconds)))
+    end_byte = min(len(pcm), int(end_seconds * bytes_per_second)) & ~3
+    start_byte = min(end_byte, int(start_seconds * bytes_per_second)) & ~3
+    playable = pcm[:end_byte] if end_byte else pcm
+    _preview_sound = pygame.mixer.Sound(buffer=playable)
+    if not loop:
+        _preview_channel = _preview_sound.play(loops=0)
+        return
+    if start_byte == 0:
+        _preview_channel = _preview_sound.play(loops=-1)
+        return
+    loop_pcm = pcm[start_byte:end_byte]
+    if not loop_pcm:
+        raise ValueError("The selected audio loop is empty")
+    _preview_loop_sound = pygame.mixer.Sound(buffer=loop_pcm)
+    _preview_channel = _preview_sound.play(loops=0)
+    # Queue the first loop pass immediately so the intro-to-loop boundary is
+    # handled by SDL's audio thread rather than by Python timer scheduling.
+    _preview_channel.queue(_preview_loop_sound)
+    holder = {}
+
+    def begin_loop():
+        global _preview_channel, _preview_timer
+        timer = holder.get("timer")
+        if _preview_timer is timer and _preview_loop_sound is not None:
+            _preview_channel.play(_preview_loop_sound, loops=-1)
+            _preview_timer = None
+
+    first_repeat_end = (end_byte + (end_byte - start_byte)) / bytes_per_second
+    _preview_timer = threading.Timer(first_repeat_end, begin_loop)
+    _preview_timer.daemon = True
+    holder["timer"] = _preview_timer
+    _preview_timer.start()
 
 
 def play_wav_bytes(data: bytes) -> Path:
@@ -754,11 +1000,16 @@ def play_wav_bytes(data: bytes) -> Path:
 
 
 def stop_audio() -> None:
-    global _preview_channel
+    global _preview_sound, _preview_channel, _preview_loop_sound, _preview_timer
+    if _preview_timer is not None:
+        _preview_timer.cancel()
+        _preview_timer = None
     try:
         import pygame
         if pygame.mixer.get_init():
             pygame.mixer.stop()
+        _preview_sound = None
+        _preview_loop_sound = None
         _preview_channel = None
         return
     except (ImportError, RuntimeError):
