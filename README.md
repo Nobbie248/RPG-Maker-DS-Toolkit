@@ -59,8 +59,9 @@ project afterward to preserve the embedded slot. Compilation adds it to NitroFS
 as `embedded/project-slot.bin` and enables a verified cold-boot installer. On a
 blank save, the ROM copies that data into project slot 1 using the game's native
 save routines and rescans it; an existing valid slot 1 is never overwritten.
-Automatic entry into **Play Game** is still under development, so the installed
-project currently needs to be launched from the title menu normally.
+The compiled ROM displays none of the game's boot logos, title screen, main
+menu, or project picker. It enters the original **Play Game / slot 1** path and
+launches the embedded game automatically from a cold boot.
 
 The online translator uses Google Translate's public web endpoint. It requires
 internet access and may change or become unavailable. Automatically translated

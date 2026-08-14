@@ -49,8 +49,9 @@ EMBEDDED_PROJECT_MEMBER = "embedded/project-slot.bin"
 # DS+ direct-boot patch.  The injected routine replaces unused C++ exception
 # diagnostic strings in ARM9 (logic_error/length_error); no executable code,
 # normal UI text, save structure, or game asset is displaced.  It installs the
-# embedded project into an empty slot 1, rescans the save manager, and then
-# calls the original Play Game entry point.
+# embedded project into save slot 1, rescans the save manager, bypasses the
+# game's logo/title/menu states, and calls the original Play Game entry point
+# for slot 1.
 DS_PLUS_DIRECT_BOOT_OVERLAY = 9
 DS_PLUS_DIRECT_BOOT_CODE_ADDRESS = 0x020B2BA4
 DS_PLUS_DIRECT_BOOT_CAVE_SHA256 = (
@@ -65,9 +66,18 @@ DS_PLUS_DIRECT_BOOT_CODE = bytes.fromhex(
 )
 
 # (RAM address, expected clean instruction, replacement instruction).
-# Redirect the title's normal save scan through the embedded-project installer.
+# These are deliberately narrow patches in the original top-level state
+# machine.  They keep the normal hardware/game initialization but replace the
+# logo/menu calls with the embedded-project installer and the game's own
+# Play Game launch path for project slot 1.
 DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
-    (0x0207435C, 0xEBFEB620, 0),           # scan save through installer
+    (0x0207435C, 0xEBFEB620, 0),           # save scan -> installer
+    (0x02074D70, 0xEBFE60D4, 0xE3A08000),  # accept title immediately
+    (0x02074D74, 0xE1A04000, 0xEA00002F),  # skip title input wait
+    (0x02075334, 0xE3E0B000, 0xE3A08003),  # select Play Game
+    (0x02075338, 0xEBFE5F62, 0xEA00004E),  # skip main-menu input wait
+    (0x020553A4, 0xE3E09000, 0xE1A06007),  # auto-accept selected project
+    (0x020553A8, 0xEBFEDF46, 0xEA000080),  # skip project-picker input wait
 )
 DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES = ()
 
@@ -351,10 +361,11 @@ def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
     """Install the verified DS+ embedded-project seed patch.
 
     ROMs without an embedded project never call this function.  On a patched
-    ROM, the title's normal save scan copies the embedded project to save slot
-    1 only when that slot is not already valid.  The original Japanese save
-    layout and redundant project copies remain unchanged.  Automatic entry
-    into Play Game is deliberately separate from this verified install stage.
+    ROM, the boot-time save scan copies the embedded project to save slot 1
+    only when that slot is not already valid, then the top-level state enters
+    the original Play Game routine for slot 1.  The main menu and the
+    project-selection screen are not constructed.  The original Japanese save
+    layout and redundant project copies remain unchanged.
     """
     if bytes(rom.idCode) != b"VEBJ":
         raise ValueError("Direct project boot currently supports DS+ (VEBJ) only")

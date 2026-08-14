@@ -8,15 +8,20 @@ visit the editor or choose **Play Game** from the title menu.
 
 ## Conclusion
 
-This is feasible. The safest implementation is not to invent a new project
-format. It should embed one complete, already-valid project slot and pass that
-data through the game's existing project validation and deserialization code.
+This is implemented and cold-boot verified. The implementation does not invent
+a new project format: it embeds one complete, already-valid project slot and
+passes that data through the game's existing validation and deserialization
+code.
 
 Two changes are required:
 
 1. Make the embedded project appear as a valid project in slot 1.
-2. After normal hardware, filesystem, save-manager, and graphics initialization,
-   enter the existing **Play Game / slot 1** path automatically.
+2. After normal hardware, filesystem, and save-manager initialization, suppress
+   the title/menu input waits and enter **Play Game / slot 1** automatically.
+
+The tested boot reaches the embedded game's own first notice in under one
+second in DeSmuME. Frame-by-frame capture showed no publisher logo, game title,
+main menu, or project-selection screen.
 
 Merely adding a file to NitroFS is not enough: the original executable reads
 projects from cartridge save memory, so a small ARM9 boot/storage patch is also

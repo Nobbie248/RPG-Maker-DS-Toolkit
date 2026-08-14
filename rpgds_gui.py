@@ -547,8 +547,9 @@ class TranslatorApp(tk.Tk):
                 "The project slot is now attached to this translation session.\n\n"
                 "Use Save Project to store it in the .rpgdsproj file. Compiling will add the "
                 "slot to the ROM and install it into an empty save slot 1 on cold boot. "
-                "An existing valid slot 1 is never overwritten. Automatic entry into Play "
-                "Game is still under development.",
+                "An existing valid slot 1 is never overwritten. The compiled ROM bypasses "
+                "the game logos, title screen, main menu, and project picker, then launches "
+                "the embedded project through the original Play Game loader.",
             )
 
     def refresh_texts(self) -> None:

@@ -139,6 +139,24 @@ class EmbeddedProjectTests(unittest.TestCase):
         self.assertEqual(
             struct.unpack_from("<I", arm9, 0x0207435C - base)[0], 0xEB00FA10,
         )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x02074D70 - base)[0], 0xE3A08000,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x02074D74 - base)[0], 0xEA00002F,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x02075334 - base)[0], 0xE3A08003,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x02075338 - base)[0], 0xEA00004E,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x020553A4 - base)[0], 0xE1A06007,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", arm9, 0x020553A8 - base)[0], 0xEA000080,
+        )
         overlays = rom.loadArm9Overlays()
         overlay = overlays[DS_PLUS_DIRECT_BOOT_OVERLAY]
         code_offset = DS_PLUS_DIRECT_BOOT_CODE_ADDRESS - base
