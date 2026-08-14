@@ -472,6 +472,33 @@ class CHBGPaletteMappingTests(unittest.TestCase):
             decode_chbg(result.data, False).tobytes(), target.tobytes(),
         )
 
+    def test_overlapping_glyph_regions_share_the_complete_shading_bank(self) -> None:
+        # A long translated label can extend into a cell whose original glyph
+        # used only two shades. Neighbouring glyphs link the rest of the same
+        # palette bank through overlapping indices. The new letter must retain
+        # an exact bright shade instead of flattening to the nearest local one.
+        palette = [0] * 256
+        palette[0] = 0x03E0
+        palette[1:6] = (0x0000, 0x2108, 0x4210, 0x6318, 0x7FFF)
+        key = uniform_tile(0)
+        broad_dark = bytes((1, 2, 3)[position % 3] for position in range(64))
+        broad_light = bytes((2, 3, 4, 5)[position % 4] for position in range(64))
+        sparse_tail = checker_tile(1, 2)
+        original = make_chbg(
+            [1] * 4 + [2] * 4 + [0] * 8 + [3] * 4,
+            [key, broad_dark, broad_light, sparse_tail],
+            palette_values=tuple(palette),
+        )
+        target = decode_chbg(original, False)
+        target.putpixel((132, 4), target.getpixel((35, 0)))
+
+        result = prepare_chbg_replacement(target, original, False)
+
+        self.assertEqual(palette_index_at(result.data, 132, 4), 5)
+        self.assertEqual(
+            decode_chbg(result.data, False).tobytes(), target.tobytes(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,3 +6,4 @@ __pycache__/
 build/
 *.spec
 dont_commit/
+audio_workspace/

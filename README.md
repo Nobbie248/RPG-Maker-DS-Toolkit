@@ -26,10 +26,13 @@ formats.
   and sentence-shortening tools.
 - Saves text and replacement artwork together in a portable `.rpgdsproj`
   project archive.
+- Browses and previews all 40 BGM, 10 ambience, 10 musical-event, and 136
+  sound-effect sequences using the ROM's native Nintendo DS ADPCM instruments.
+- Exports MIDI or the complete SSEQ/SBNK/SWAR/SWAV sound library, and imports
+  MIDI with per-track DS instrument assignment.
 - Reads RPG Tsukuru DS+ `.sav` and DeSmuME `.dsv` files, validates their four
   mirrored created-game slots, and builds a one-time direct-boot ROM from the
   selected project without changing the saved toolkit project.
-- Rebuilds a separate test ROM without modifying the clean source ROM.
 
 ## Supported games
 
@@ -55,9 +58,11 @@ modified dump, or damaged file should not be used.
 6. Review the results in the **Text** workspace and correct them in game context.
 7. Use **Graphics** to export, edit, and re-import graphical assets. It exposes
    tiled `CHBG` atlases and fixed-size `BMBG` bitmaps such as `edit/ep67.blz`.
-8. Return to **File** and select **Save Toolkit Project** to preserve
+8. Use **Music / SFX** to preview native tracks, export or import MIDI, assign
+   DS instruments, or extract the complete sound-bank library.
+9. Return to **File** and select **Save Toolkit Project** to preserve
    the translation work.
-9. Open **Compile ROM** to create a separate test ROM.
+10. Open **Compile ROM** to create a separate test ROM.
 
 For DS+, **Build Direct-Boot ROM from Save** reads the four created-game slots
 from a raw `.sav` or DeSmuME `.dsv`. Only populated slots with matching redundant
@@ -85,6 +90,7 @@ palette relationship, and decoded byte size.
 
 - every extracted text record and its current English translation;
 - imported replacement PNG artwork;
+- imported replacement SSEQ music generated from MIDI;
 - the expected source-ROM path and SHA-256; and
 - metadata linking each replacement to its internal ROM asset.
 

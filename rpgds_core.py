@@ -24,6 +24,8 @@ import ndspy.code
 import ndspy.codeCompression
 import ndspy.fnt
 import ndspy.rom
+import ndspy.soundArchive
+import ndspy.soundSequence
 
 from rpgds_text import (
     format_tokens,
@@ -592,6 +594,8 @@ def structural_suffix_is_preserved(original: str, translation: str) -> bool:
 
 def translation_fits(original: str, translation: str, max_bytes: int) -> bool:
     """Return whether a manual translation can safely occupy a fixed text slot."""
+    if translation == " ":
+        return not format_tokens(original) and not structural_asset_suffix(original)
     if not translation or has_unsafe_control_chars(translation):
         return False
     try:
@@ -609,6 +613,11 @@ def translation_is_safe(original: str, translation: str) -> bool:
     Unlike ``translation_fits``, this permits text that needs relocation into
     the owning ARM9/overlay's existing text storage.
     """
+    if translation == " ":
+        # A single space is the editor's persisted "intentionally blank"
+        # marker. Never permit it to erase printf/control data or :NNN asset
+        # identifiers, because those strings are parsed rather than displayed.
+        return not format_tokens(original) and not structural_asset_suffix(original)
     if not translation or has_unsafe_control_chars(translation):
         return False
     try:
@@ -635,6 +644,8 @@ class TextEntry:
 
     @property
     def used_bytes(self) -> int:
+        if self.translation == " ":
+            return 0
         try:
             return len(self.translation.encode("cp932"))
         except UnicodeEncodeError:
@@ -1350,29 +1361,63 @@ def prepare_chbg_replacement(image: Image.Image, original_raw: bytes,
     # rest but breaks when highlighted. Empty horizontal regions inherit the
     # nearest populated domain in the same band so longer English labels may
     # safely extend beyond the Japanese label's original width.
-    region_roles: dict[tuple[int, int], tuple[tuple[int, ...], Counter[int]]] = {}
-    for region, usage in region_usage.items():
-        band, column = region
-        role_usage = usage
-        non_key = tuple(
+    non_key_by_region = {
+        region: {
             index for index in usable_indices
             if index != 0 and usage[index]
-        )
-        if not non_key:
-            siblings: list[tuple[int, Counter[int], tuple[int, ...]]] = []
-            for (other_band, other_column), other_usage in region_usage.items():
-                if other_band != band:
+        }
+        for region, usage in region_usage.items()
+    }
+    # A single glyph rarely uses every shade in its palette bank. Restricting
+    # a translated letter to only the indices present in its 32-pixel cell can
+    # therefore flatten later letters to solid white. Build complete semantic
+    # banks by joining same-band regions whose index sets overlap. Separate
+    # animated controls remain isolated because their role indices are
+    # disjoint, while all shades used by neighbouring glyphs become available.
+    populated_roles: dict[
+        tuple[int, int], tuple[tuple[int, ...], Counter[int]]
+    ] = {}
+    for region, seed_indices in non_key_by_region.items():
+        if not seed_indices:
+            continue
+        band, _column = region
+        connected = {region}
+        candidates_set = set(seed_indices)
+        changed = True
+        while changed:
+            changed = False
+            for other_region, other_indices in non_key_by_region.items():
+                if other_region in connected or other_region[0] != band:
                     continue
-                other_non_key = tuple(
-                    index for index in usable_indices
-                    if index != 0 and other_usage[index]
-                )
-                if other_non_key:
-                    siblings.append((abs(other_column - column), other_usage, other_non_key))
-            if siblings:
-                _, role_usage, non_key = min(siblings, key=lambda item: item[0])
-        candidates = non_key if non_key else non_key_indices
-        region_roles[region] = candidates, role_usage
+                # One shared support color (often a common outline or button
+                # fill) is not enough to prove two animated roles are the same
+                # bank. Two shared indices reliably link neighbouring glyphs
+                # without collapsing duplicate-color control roles.
+                if len(candidates_set.intersection(other_indices)) >= 2:
+                    connected.add(other_region)
+                    candidates_set.update(other_indices)
+                    changed = True
+        role_usage: Counter[int] = Counter()
+        for connected_region in connected:
+            role_usage.update(region_usage[connected_region])
+        populated_roles[region] = tuple(sorted(candidates_set)), role_usage
+
+    region_roles: dict[tuple[int, int], tuple[tuple[int, ...], Counter[int]]] = {}
+    for region in region_usage:
+        if region in populated_roles:
+            region_roles[region] = populated_roles[region]
+            continue
+        band, column = region
+        siblings = [
+            (abs(other_column - column), candidates, usage)
+            for (other_band, other_column), (candidates, usage) in populated_roles.items()
+            if other_band == band
+        ]
+        if siblings:
+            _distance, candidates, role_usage = min(siblings, key=lambda item: item[0])
+            region_roles[region] = candidates, role_usage
+        else:
+            region_roles[region] = non_key_indices, palette_usage
 
     nearest_cache: dict[tuple[int, int, tuple[int, int, int]], int] = {}
     raw_indices_array = bytearray()
@@ -1769,6 +1814,8 @@ def repair_entry_translation(entry: TextEntry, translation: str) -> str:
     playback, while an odd byte count also makes the converter skip the NUL
     terminator.  Full-width CP932 Latin text round-trips through both tables.
     """
+    if translation and translation.isspace():
+        return " " if translation_is_safe(entry.original, " ") else ""
     if not translation:
         return ""
 
@@ -2046,7 +2093,7 @@ def _apply_region_entries(data: bytearray, ram_address: int,
     for entry in translated:
         if entry.key in selected_keys:
             continue
-        raw = entry.translation.encode("cp932")
+        raw = b"" if entry.translation == " " else entry.translation.encode("cp932")
         data[entry.offset : entry.offset + entry.max_bytes] = (
             raw + b"\0" * (entry.max_bytes - len(raw))
         )
@@ -2108,7 +2155,8 @@ def apply_entries(rom: ndspy.rom.NintendoDSRom, entries: Iterable[TextEntry]) ->
 
 def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry],
                 image_pngs: dict[str, bytes],
-                embedded_project: EmbeddedProject | None = None) -> tuple[int, int]:
+                embedded_project: EmbeddedProject | None = None,
+                audio_replacements: dict[str, bytes] | None = None) -> tuple[int, int]:
     rom = ndspy.rom.NintendoDSRom.fromFile(source_rom)
     if embedded_project is not None:
         if bytes(rom.idCode) != b"VEBJ":
@@ -2139,6 +2187,20 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
             raise ValueError(f"Image replacement {name}: {exc}") from exc
         rom.setFileByName(name, encoded)
         image_count += 1
+    if audio_replacements:
+        sdat = ndspy.soundArchive.SDAT(bytes(rom.getFileByName("sound/sound_data.sdat")))
+        for key, raw_sequence in audio_replacements.items():
+            kind, index_text = key.split(":", 1)
+            index = int(index_text)
+            if kind not in {"bgm", "bgs", "me"}:
+                raise ValueError(f"MIDI replacement is not supported for {key}")
+            original = sdat.sequences[index][1]
+            replacement = ndspy.soundSequence.SSEQ(
+                raw_sequence, original.unk02, original.bankID, original.volume,
+                original.channelPressure, original.polyphonicPressure, original.playerID,
+            )
+            sdat.sequences[index] = (sdat.sequences[index][0], replacement)
+        rom.setFileByName("sound/sound_data.sdat", bytes(sdat.save()))
     if embedded_project is not None:
         apply_ds_plus_direct_boot(rom)
     rom.saveToFile(output_rom, updateDeviceCapacity=True)
@@ -2147,7 +2209,8 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
 
 def save_project(path: Path, source_rom: Path, entries: Iterable[TextEntry],
                  image_pngs: dict[str, bytes],
-                 embedded_project: EmbeddedProject | None = None) -> None:
+                 embedded_project: EmbeddedProject | None = None,
+                 audio_replacements: dict[str, bytes] | None = None) -> None:
     metadata = {"version": PROJECT_VERSION, "source_rom": str(source_rom),
                 "source_sha256": sha256_file(source_rom), "images": {}}
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -2175,6 +2238,12 @@ def save_project(path: Path, source_rom: Path, entries: Iterable[TextEntry],
             member = f"images/{index:04d}.png"
             metadata["images"][name] = member
             archive.writestr(member, sanitize_png_bytes(png))
+        if audio_replacements:
+            metadata["audio"] = {}
+            for index, (key, sequence) in enumerate(sorted(audio_replacements.items())):
+                member = f"audio/{index:04d}.sseq"
+                metadata["audio"][key] = member
+                archive.writestr(member, sequence)
         if embedded_project is not None:
             validate_embedded_project(embedded_project)
             metadata["embedded_project"] = {
@@ -2235,3 +2304,11 @@ def load_project(path: Path) -> tuple[
             if expected_hash and embedded_project.sha256 != expected_hash:
                 raise ValueError("Embedded project hash does not match project.json")
     return Path(metadata["source_rom"]), rows, images, embedded_project
+
+
+def load_project_audio(path: Path) -> dict[str, bytes]:
+    """Load optional SSEQ replacements without changing load_project's stable API."""
+    with zipfile.ZipFile(path, "r") as archive:
+        metadata = json.loads(archive.read("project.json"))
+        return {key: archive.read(member)
+                for key, member in metadata.get("audio", {}).items()}
