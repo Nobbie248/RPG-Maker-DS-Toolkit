@@ -17,6 +17,8 @@ from rpgds_core import (
     EmbeddedProject,
     DS_PLUS_DIRECT_BOOT_CODE,
     DS_PLUS_DIRECT_BOOT_CODE_ADDRESS,
+    DS_PLUS_DIRECT_BOOT_TRAMPOLINE,
+    DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS,
     DS_PLUS_DIRECT_BOOT_OVERLAY,
     _set_embedded_project_file,
     apply_ds_plus_direct_boot,
@@ -136,33 +138,34 @@ class EmbeddedProjectTests(unittest.TestCase):
 
         arm9 = ndspy.codeCompression.decompress(bytes(rom.arm9))
         base = rom.arm9RamAddress
+        # The sole state-machine hook replaces the title-sequence call.  The
+        # old title/menu/picker input loops remain completely unmodified.
         self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x0207435C - base)[0], 0xEB00FA10,
+            struct.unpack_from("<I", arm9, 0x02072D4C - base)[0], 0xEB00FFB8,
         )
-        self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x02074D70 - base)[0], 0xE3A08000,
-        )
-        self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x02074D74 - base)[0], 0xEA00002F,
-        )
-        self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x02075334 - base)[0], 0xE3A08003,
-        )
-        self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x02075338 - base)[0], 0xEA00004E,
-        )
-        self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x020553A4 - base)[0], 0xE1A06007,
-        )
-        self.assertEqual(
-            struct.unpack_from("<I", arm9, 0x020553A8 - base)[0], 0xEA000080,
-        )
+        for address, clean_word in (
+            (0x0207435C, 0xEBFEB620),
+            (0x02074D70, 0xEBFE60D4),
+            (0x02074D74, 0xE1A04000),
+            (0x02075334, 0xE3E0B000),
+            (0x02075338, 0xEBFE5F62),
+            (0x020553A4, 0xE3E09000),
+            (0x020553A8, 0xEBFEDF46),
+        ):
+            self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], clean_word)
         overlays = rom.loadArm9Overlays()
         overlay = overlays[DS_PLUS_DIRECT_BOOT_OVERLAY]
         code_offset = DS_PLUS_DIRECT_BOOT_CODE_ADDRESS - base
         self.assertEqual(
             bytes(arm9[code_offset:code_offset + len(DS_PLUS_DIRECT_BOOT_CODE)]),
             DS_PLUS_DIRECT_BOOT_CODE,
+        )
+        trampoline_offset = DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS - base
+        self.assertEqual(
+            bytes(arm9[
+                trampoline_offset:trampoline_offset + len(DS_PLUS_DIRECT_BOOT_TRAMPOLINE)
+            ]),
+            DS_PLUS_DIRECT_BOOT_TRAMPOLINE,
         )
         self.assertEqual(overlay.ramSize, 0x57FC0)
         self.assertEqual(bytes(rom.getFileByName("embedded/project-slot.bin")), slot)

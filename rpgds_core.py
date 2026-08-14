@@ -54,30 +54,39 @@ EMBEDDED_PROJECT_MEMBER = "embedded/project-slot.bin"
 # for slot 1.
 DS_PLUS_DIRECT_BOOT_OVERLAY = 9
 DS_PLUS_DIRECT_BOOT_CODE_ADDRESS = 0x020B2BA4
+DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS = 0x020B2C34
 DS_PLUS_DIRECT_BOOT_CAVE_SHA256 = (
-    "ce2f9fd01e9340947ccde68ae72efd0645ac683fdee0df67570f7b3916159c72"
+    "2fb9af6adccc92e3de1426007c770feaf7d4b04e82a63f6f9b0c1e7e69516484"
 )
 DS_PLUS_DIRECT_BOOT_CODE = bytes.fromhex(
-    "f0412de90080a0e108d04de20800a0e10abcfdeb0800a0e10010a0e363bcfdeb"
+    "f0412de9b4831fe508d04de20800a0e10abcfdeb0800a0e10010a0e363bcfdeb"
     "000050e31000001a0000a0e300008de504008de538008fe20d10a0e104208de2"
     "0130a0e393a5fdeb00109de504209de50000a0e345adfdeb0800a0e1f7bbfdeb"
     "00109de50000a0e39b66fdeb08d08de2f081bde8656d6265646465642f70726f"
     "6a6563742d736c6f742e62696e000000"
 )
+DS_PLUS_DIRECT_BOOT_TRAMPOLINE = bytes.fromhex(
+    # Install/rescan the embedded slot, select slot zero through the game's
+    # original project selector state, set the top-level result to Play Game,
+    # and enter the existing game-launch continuation.  This is a state-machine
+    # branch: it never constructs or runs the logo, title, main-menu, or
+    # project-picker states and it does not synthesize controller input.
+    "daffffeb"  # bl  0x020B2BA4      (installer)
+    "0000a0e3"  # mov r0, #0          (slot 1 / zero-based index)
+    "2a21ffeb"  # bl  0x0207B0EC      (select project)
+    "0200a0e3"  # mov r0, #2          (Play Game state)
+    "10008de5"  # str r0, [sp, #0x10]
+    "8102ffea"  # b   0x02073654      (game-launch continuation)
+)
 
 # (RAM address, expected clean instruction, replacement instruction).
-# These are deliberately narrow patches in the original top-level state
-# machine.  They keep the normal hardware/game initialization but replace the
-# logo/menu calls with the embedded-project installer and the game's own
-# Play Game launch path for project slot 1.
+# This one deliberately narrow patch replaces the top-level call that enters
+# the entire logo/title flow.  The trampoline branches directly into the
+# original Play Game continuation after installing and selecting project slot
+# 1.  The title, menu, and picker functions remain byte-identical but become
+# unreachable on this embedded-project boot path.
 DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
-    (0x0207435C, 0xEBFEB620, 0),           # save scan -> installer
-    (0x02074D70, 0xEBFE60D4, 0xE3A08000),  # accept title immediately
-    (0x02074D74, 0xE1A04000, 0xEA00002F),  # skip title input wait
-    (0x02075334, 0xE3E0B000, 0xE3A08003),  # select Play Game
-    (0x02075338, 0xEBFE5F62, 0xEA00004E),  # skip main-menu input wait
-    (0x020553A4, 0xE3E09000, 0xE1A06007),  # auto-accept selected project
-    (0x020553A8, 0xEBFEDF46, 0xEA000080),  # skip project-picker input wait
+    (0x02072D4C, 0xEB0007D0, 0),  # title-sequence call -> direct branch
 )
 DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES = ()
 
@@ -376,18 +385,27 @@ def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
     arm9 = bytearray(ndspy.codeCompression.decompress(bytes(rom.arm9)))
     for address, expected, replacement in DS_PLUS_DIRECT_BOOT_ARM9_PATCHES:
         if not replacement:
-            replacement = _arm_bl(address, DS_PLUS_DIRECT_BOOT_CODE_ADDRESS)
+            replacement = _arm_bl(address, DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS)
         _patch_instruction(
             arm9, rom.arm9RamAddress, address, expected, replacement, "ARM9",
         )
     cave_offset = DS_PLUS_DIRECT_BOOT_CODE_ADDRESS - rom.arm9RamAddress
-    cave = bytes(arm9[cave_offset:cave_offset + len(DS_PLUS_DIRECT_BOOT_CODE)])
+    cave_end = (
+        DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS
+        + len(DS_PLUS_DIRECT_BOOT_TRAMPOLINE)
+        - rom.arm9RamAddress
+    )
+    cave = bytes(arm9[cave_offset:cave_end])
     if hashlib.sha256(cave).hexdigest() != DS_PLUS_DIRECT_BOOT_CAVE_SHA256:
         raise ValueError(
             "Direct-boot ARM9 code cave does not match the verified DS+ build"
         )
     arm9[cave_offset:cave_offset + len(DS_PLUS_DIRECT_BOOT_CODE)] = (
         DS_PLUS_DIRECT_BOOT_CODE
+    )
+    trampoline_offset = DS_PLUS_DIRECT_BOOT_TRAMPOLINE_ADDRESS - rom.arm9RamAddress
+    arm9[trampoline_offset:trampoline_offset + len(DS_PLUS_DIRECT_BOOT_TRAMPOLINE)] = (
+        DS_PLUS_DIRECT_BOOT_TRAMPOLINE
     )
     rom.arm9 = _compress_arm9(bytes(arm9), rom.arm9RamAddress)
 

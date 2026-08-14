@@ -16,12 +16,13 @@ code.
 Two changes are required:
 
 1. Make the embedded project appear as a valid project in slot 1.
-2. After normal hardware, filesystem, and save-manager initialization, suppress
-   the title/menu input waits and enter **Play Game / slot 1** automatically.
+2. Replace the top-level title-sequence call with a direct state-machine branch
+   into the original **Play Game / slot 1** continuation.
 
-The tested boot reaches the embedded game's own first notice in under one
-second in DeSmuME. Frame-by-frame capture showed no publisher logo, game title,
-main menu, or project-selection screen.
+The tested boot's first application screen is the embedded game's own first
+notice. The publisher logo, game title, main menu, and project-selection
+functions are not called; the patch does not fake button presses or shorten
+their input waits.
 
 Merely adding a file to NitroFS is not enough: the original executable reads
 projects from cartridge save memory, so a small ARM9 boot/storage patch is also
@@ -57,7 +58,7 @@ The original loader is useful for the proposed feature:
 - ARM9 `0x02021D60` reads later slices of a validated record through the same
   storage path.
 
-The title/menu state machine is in the ARM9 area around `0x02075F8C`. It contains
+The title/menu state machine starts at ARM9 `0x02072CC0`. It contains
 the existing project/game selection and test-play transitions. A direct-boot
 patch must enter the same high-level play handler after initialization rather
 than jumping directly into an overlay or map routine.
@@ -86,18 +87,18 @@ The current English ROM is 21,199,208 bytes while the original cartridge image
 is 33,554,432 bytes. A raw 251,068-byte project therefore fits comfortably in
 ROM capacity. It does not need to remain resident in RAM.
 
-## Recommended implementation: first-boot project installer
+## Implemented design: first-boot project installer
 
 This is the least invasive and most compatible design.
 
 1. Add `embedded/project-slot.bin` to NitroFS when compiling the ROM.
-2. During boot, before the normal slot scan, check a version marker or determine
-   whether project slot 1 is empty.
+2. During boot, run the normal slot scan and determine whether project slot 1
+   already contains a valid project.
 3. Stream the embedded slot into project slot 1 using the game's existing save
    write facilities. Streaming avoids a permanent 251 KiB allocation.
 4. Run the original `0x02021BE4` scan and original deserializer.
 5. Select slot 1 and enter the original Play Game path automatically.
-6. On later boots, do not reinstall unless the embedded project version changed.
+6. On later boots, do not reinstall while slot 1 remains valid.
 
 Advantages:
 
