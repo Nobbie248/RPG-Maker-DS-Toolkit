@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 
 import ndspy.code
 import ndspy.codeCompression
+import ndspy.fnt
 import ndspy.rom
 
 from rpgds_text import (
@@ -32,9 +33,18 @@ from rpgds_text import (
 )
 
 
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 CHBG_SIZE_ALLOWANCE_PERCENT = 50
 STRUCTURAL_ASSET_SUFFIX_RE = re.compile(r"(?P<suffix>:\d{3})$")
+
+DS_PLUS_SAVE_PAYLOAD_SIZE = 0x100000
+DS_PLUS_PROJECT_SLOT_SIZE = 0x3D4BC
+DS_PLUS_PROJECT_COPY_SIZE = 0x1EA5E
+DS_PLUS_PROJECT_SLOT_COUNT = 4
+DS_PLUS_PROJECT_INTEGRITY_WORD = 0x99814001
+DESMUME_SAVE_FOOTER_MAGIC = b"|-DESMUME SAVE-|"
+EMBEDDED_PROJECT_ROM_PATH = "embedded/project-slot.bin"
+EMBEDDED_PROJECT_MEMBER = "embedded/project-slot.bin"
 
 # Verified CP932 prose/UI pools in the decompressed ARM9. Other pointer targets
 # include keyboard layouts, character conversion tables, and ARM instructions
@@ -72,6 +82,46 @@ class ROMProfile:
     excluded_overlay_ranges: tuple[tuple[int, int, int], ...] = ()
     allow_text_relocation: bool = True
     fixed_slot_overlays: frozenset[int] = frozenset()
+
+
+@dataclass(frozen=True)
+class SaveProjectSlot:
+    """One physical DS+ created-game slot found in a battery save."""
+
+    number: int
+    data: bytes
+    populated: bool
+    copies_match: bool
+    integrity_words_valid: bool
+    occupied_bytes: int
+    sha256: str
+
+    @property
+    def embeddable(self) -> bool:
+        return self.populated and self.copies_match and self.integrity_words_valid
+
+    @property
+    def status(self) -> str:
+        if not self.populated:
+            return "Empty"
+        if not self.copies_match:
+            return "Unsafe: safety copies differ"
+        if not self.integrity_words_valid:
+            return "Unsafe: integrity marker missing"
+        return "Ready to embed"
+
+
+@dataclass(frozen=True)
+class EmbeddedProject:
+    """A validated physical project slot stored in a translation project."""
+
+    source_slot: int
+    data: bytes
+    source_name: str = ""
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.data).hexdigest()
 
 
 ROM_PROFILES = {
@@ -166,6 +216,85 @@ def profile_for_rom(rom: ndspy.rom.NintendoDSRom) -> ROMProfile:
         supported = ", ".join(code.decode("ascii") for code in ROM_PROFILES)
         raise ValueError(f"Unsupported ROM game code {bytes(rom.idCode)!r}; expected {supported}")
     return profile
+
+
+def read_dsplus_save_payload(path: Path) -> bytes:
+    """Read the 1 MiB cartridge payload from a raw SAV or DeSmuME DSV."""
+    raw = path.read_bytes()
+    if len(raw) == DS_PLUS_SAVE_PAYLOAD_SIZE:
+        return raw
+    if (len(raw) > DS_PLUS_SAVE_PAYLOAD_SIZE
+            and raw.endswith(DESMUME_SAVE_FOOTER_MAGIC)):
+        return raw[:DS_PLUS_SAVE_PAYLOAD_SIZE]
+    raise ValueError(
+        f"{path.name} is not a supported RPG Tsukuru DS+ save. Expected a "
+        f"{DS_PLUS_SAVE_PAYLOAD_SIZE:,}-byte .sav or a DeSmuME .dsv with its footer."
+    )
+
+
+def scan_dsplus_project_slots(path: Path) -> list[SaveProjectSlot]:
+    """Inspect the four DS+ created-game slots without modifying the save."""
+    payload = read_dsplus_save_payload(path)
+    slots: list[SaveProjectSlot] = []
+    marker = struct.pack("<I", DS_PLUS_PROJECT_INTEGRITY_WORD)
+    for index in range(DS_PLUS_PROJECT_SLOT_COUNT):
+        start = index * DS_PLUS_PROJECT_SLOT_SIZE
+        data = payload[start:start + DS_PLUS_PROJECT_SLOT_SIZE]
+        primary = data[:DS_PLUS_PROJECT_COPY_SIZE]
+        mirror = data[DS_PLUS_PROJECT_COPY_SIZE:]
+        populated = any(value != 0xFF for value in data)
+        slots.append(SaveProjectSlot(
+            number=index + 1,
+            data=data,
+            populated=populated,
+            copies_match=primary == mirror,
+            integrity_words_valid=(primary[-4:] == marker and mirror[-4:] == marker),
+            occupied_bytes=sum(value != 0xFF for value in primary),
+            sha256=hashlib.sha256(data).hexdigest(),
+        ))
+    return slots
+
+
+def validate_embedded_project(project: EmbeddedProject) -> None:
+    """Reject malformed or partially written project-slot payloads."""
+    if not 1 <= project.source_slot <= DS_PLUS_PROJECT_SLOT_COUNT:
+        raise ValueError("Embedded project source slot must be between 1 and 4")
+    if len(project.data) != DS_PLUS_PROJECT_SLOT_SIZE:
+        raise ValueError(
+            f"Embedded project is {len(project.data):,} bytes; expected "
+            f"{DS_PLUS_PROJECT_SLOT_SIZE:,} bytes"
+        )
+    primary = project.data[:DS_PLUS_PROJECT_COPY_SIZE]
+    mirror = project.data[DS_PLUS_PROJECT_COPY_SIZE:]
+    if primary != mirror:
+        raise ValueError("Embedded project's redundant safety copies do not match")
+    if not any(value != 0xFF for value in primary):
+        raise ValueError("Embedded project slot is empty")
+    marker = struct.pack("<I", DS_PLUS_PROJECT_INTEGRITY_WORD)
+    if primary[-4:] != marker or mirror[-4:] != marker:
+        raise ValueError("Embedded project integrity marker is missing")
+
+
+def embedded_project_from_slot(slot: SaveProjectSlot, source_name: str = "") -> EmbeddedProject:
+    if not slot.embeddable:
+        raise ValueError(f"Project slot {slot.number} cannot be embedded: {slot.status}")
+    project = EmbeddedProject(slot.number, slot.data, source_name)
+    validate_embedded_project(project)
+    return project
+
+
+def _set_embedded_project_file(rom: ndspy.rom.NintendoDSRom, data: bytes) -> None:
+    """Add or replace the final NitroFS file without renumbering existing files."""
+    existing_id = rom.filenames.idOf(EMBEDDED_PROJECT_ROM_PATH)
+    if existing_id is not None:
+        rom.files[existing_id] = data
+        return
+    file_id = len(rom.files)
+    rom.files.append(data)
+    rom.filenames.folders.append((
+        "embedded",
+        ndspy.fnt.Folder(files=["project-slot.bin"], firstID=file_id),
+    ))
 
 
 def _compress_arm9(data: bytes, ram_address: int) -> bytearray:
@@ -1740,8 +1869,14 @@ def apply_entries(rom: ndspy.rom.NintendoDSRom, entries: Iterable[TextEntry]) ->
 
 
 def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry],
-                image_pngs: dict[str, bytes]) -> tuple[int, int]:
+                image_pngs: dict[str, bytes],
+                embedded_project: EmbeddedProject | None = None) -> tuple[int, int]:
     rom = ndspy.rom.NintendoDSRom.fromFile(source_rom)
+    if embedded_project is not None:
+        if bytes(rom.idCode) != b"VEBJ":
+            raise ValueError("Embedded created-game projects currently support DS+ (VEBJ) only")
+        validate_embedded_project(embedded_project)
+        _set_embedded_project_file(rom, embedded_project.data)
     text_count = apply_entries(rom, entries)
     image_count = 0
     for name, png_data in image_pngs.items():
@@ -1770,7 +1905,9 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
     return text_count, image_count
 
 
-def save_project(path: Path, source_rom: Path, entries: Iterable[TextEntry], image_pngs: dict[str, bytes]) -> None:
+def save_project(path: Path, source_rom: Path, entries: Iterable[TextEntry],
+                 image_pngs: dict[str, bytes],
+                 embedded_project: EmbeddedProject | None = None) -> None:
     metadata = {"version": PROJECT_VERSION, "source_rom": str(source_rom),
                 "source_sha256": sha256_file(source_rom), "images": {}}
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -1798,10 +1935,21 @@ def save_project(path: Path, source_rom: Path, entries: Iterable[TextEntry], ima
             member = f"images/{index:04d}.png"
             metadata["images"][name] = member
             archive.writestr(member, sanitize_png_bytes(png))
+        if embedded_project is not None:
+            validate_embedded_project(embedded_project)
+            metadata["embedded_project"] = {
+                "member": EMBEDDED_PROJECT_MEMBER,
+                "source_slot": embedded_project.source_slot,
+                "source_name": embedded_project.source_name,
+                "size": len(embedded_project.data),
+                "sha256": embedded_project.sha256,
+            }
+            archive.writestr(EMBEDDED_PROJECT_MEMBER, embedded_project.data)
         archive.writestr("project.json", json.dumps(metadata, indent=2))
 
 
-def load_project(path: Path) -> tuple[Path, dict[str, dict], dict[str, bytes]]:
+def load_project(path: Path) -> tuple[
+        Path, dict[str, dict], dict[str, bytes], EmbeddedProject | None]:
     with zipfile.ZipFile(path, "r") as archive:
         metadata = json.loads(archive.read("project.json"))
         rows: dict[str, dict] = {}
@@ -1832,4 +1980,18 @@ def load_project(path: Path) -> tuple[Path, dict[str, dict], dict[str, bytes]]:
             key = f"{int(row['overlay'])}:{int(row['offset'], 0):X}"
             rows[key] = row
         images = {name: archive.read(member) for name, member in metadata.get("images", {}).items()}
-    return Path(metadata["source_rom"]), rows, images
+        embedded_project = None
+        embedded_metadata = metadata.get("embedded_project")
+        if embedded_metadata:
+            member = embedded_metadata.get("member", EMBEDDED_PROJECT_MEMBER)
+            data = archive.read(member)
+            embedded_project = EmbeddedProject(
+                source_slot=int(embedded_metadata["source_slot"]),
+                data=data,
+                source_name=str(embedded_metadata.get("source_name", "")),
+            )
+            validate_embedded_project(embedded_project)
+            expected_hash = str(embedded_metadata.get("sha256", "")).lower()
+            if expected_hash and embedded_project.sha256 != expected_hash:
+                raise ValueError("Embedded project hash does not match project.json")
+    return Path(metadata["source_rom"]), rows, images, embedded_project

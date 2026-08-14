@@ -26,6 +26,8 @@ formats.
   and sentence-shortening tools.
 - Saves text and replacement artwork together in a portable `.rpgdsproj`
   project archive.
+- Reads RPG Tsukuru DS+ `.sav` and DeSmuME `.dsv` files, validates their four
+  mirrored created-game slots, and attaches one selected project to the archive.
 - Rebuilds a separate test ROM without modifying the clean source ROM.
 
 ## Supported games
@@ -50,6 +52,14 @@ modified dump, or damaged file should not be used.
 7. Select **Save Project** to preserve the translation work.
 8. Select **Compile ROM** to create a separate test ROM.
 
+For DS+, **Embed Project from Save** reads the four created-game slots from a
+raw `.sav` or DeSmuME `.dsv`. Only populated slots with matching redundant
+safety copies and valid integrity markers can be selected. Save the translation
+project afterward to preserve the embedded slot. Compilation adds it to NitroFS
+as `embedded/project-slot.bin`. Automatic cold-boot loading is a separate,
+not-yet-enabled executable patch; attaching the slot alone does not change the
+normal title-screen boot flow.
+
 The online translator uses Google Translate's public web endpoint. It requires
 internet access and may change or become unavailable. Automatically translated
 text should always be reviewed before a public release.
@@ -63,6 +73,7 @@ palette relationship, and decoded byte size.
 
 - every extracted text record and its current English translation;
 - imported replacement PNG artwork;
+- an optional validated DS+ created-game slot selected from a save;
 - the expected source-ROM path and SHA-256; and
 - metadata linking each replacement to its internal ROM asset.
 
