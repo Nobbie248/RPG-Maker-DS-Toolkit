@@ -83,10 +83,19 @@ DS_PLUS_DIRECT_BOOT_TRAMPOLINE = bytes.fromhex(
 # the entire logo/title flow.  The trampoline branches directly into the
 # original Play Game continuation after installing and selecting project slot
 # 1.  The title and menu functions remain byte-identical but become unreachable
-# on this embedded-project boot path.  The project selector enters its original
-# activation handler before it allocates or draws the picker UI.
+# on this embedded-project boot path.  The project selector initializes only
+# its nonvisual state, then enters its original activation handler without
+# allocating or drawing the picker UI.
 DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
     (0x02072D4C, 0xEB0007D0, 0),  # title-sequence call -> direct branch
+    # The selector constructor has finished initializing every data field at
+    # this point. Return before it allocates the background, tile layers, and
+    # picker sprites; the activation path below does not need those objects.
+    (0x02054D7C, 0xEBFEDE80, 0xE3A00000),  # mov r0, #0
+    (0x02054D80, 0xE3500000, 0xE58A0010),  # str r0, [sl, #0x10]
+    (0x02054D84, 0x0A000000, 0xE58A0014),  # str r0, [sl, #0x14]
+    (0x02054D88, 0xEBFEF648, 0xE28DD014),  # add sp, sp, #0x14
+    (0x02054D8C, 0xE3A01001, 0xE8BD8FF0),  # pop {..., pc}
     # Immediately after the selector function's prologue, choose the first
     # slot and enter its ordinary acceptance path.  Branching here prevents
     # the picker graphics, frame update, and input loop from ever being made.

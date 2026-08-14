@@ -21,8 +21,9 @@ Two changes are required:
 
 The tested boot's first application screen is the embedded game's own first
 notice. The publisher logo, game title, main menu, and project-selection screen
-are not displayed. The selector enters its internal activation path before its
-picker UI is allocated or drawn, then deserializes the database, initial party,
+are not displayed. The selector constructor initializes its nonvisual fields
+but returns before allocating its background, tile layers, or sprites. It then
+enters the internal activation path to deserialize the database, initial party,
 and maps. No controller input is synthesized.
 
 Merely adding a file to NitroFS is not enough: the original executable reads

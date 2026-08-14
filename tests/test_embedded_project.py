@@ -152,6 +152,16 @@ class EmbeddedProjectTests(unittest.TestCase):
             (0x02075338, 0xEBFE5F62),
         ):
             self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], clean_word)
+        # The data portion of the selector constructor runs, but it returns
+        # before the first graphics object is allocated.
+        for address, patched_word in (
+            (0x02054D7C, 0xE3A00000),
+            (0x02054D80, 0xE58A0010),
+            (0x02054D84, 0xE58A0014),
+            (0x02054D88, 0xE28DD014),
+            (0x02054D8C, 0xE8BD8FF0),
+        ):
+            self.assertEqual(struct.unpack_from("<I", arm9, address - base)[0], patched_word)
         for address, patched_word in (
             (0x02055238, 0xE3A05000),
             (0x0205523C, 0xE3A06000),
