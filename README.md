@@ -1,3 +1,5 @@
+![RPG Maker DS Toolkit graphics editor](image.png)
+
 # RPG Maker DS Toolkit
 
 An unofficial Windows development, translation, and modding toolkit for the
