@@ -145,6 +145,11 @@ def image_asset_category(name: str) -> str:
     return "Misc"
 
 
+def editor_translation_value(raw_value: str) -> str:
+    """Preserve entered spacing; one whitespace-only value remains the blank marker."""
+    return " " if raw_value and raw_value.isspace() else raw_value
+
+
 class TranslatorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -1660,7 +1665,7 @@ class TranslatorApp(tk.Tk):
         # A whitespace-only edit is an explicit request for an empty ROM
         # string. Persist one space as the marker; the compiler emits only NUL
         # bytes. An actually empty editor still means "use the Japanese text".
-        value = " " if raw_value and raw_value.isspace() else raw_value.strip()
+        value = editor_translation_value(raw_value)
         if value:
             repaired = repair_entry_translation(entry, value)
             if not repaired:

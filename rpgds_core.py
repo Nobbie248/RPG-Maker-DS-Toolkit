@@ -1905,13 +1905,15 @@ def fit_translation(original: str, english: str, max_bytes: int) -> str:
 
 def _fullwidth_event_text(text: str) -> str:
     """Convert visible ASCII to CP932 full-width forms, preserving printf tokens."""
-    # normalize_english() intentionally trims ordinary UI text, but the
-    # acquisition suffix needs its leading separator: it is concatenated
-    # directly after an item or money amount.  Remember that separator before
-    # normalization and restore it as the full-width CP932 space understood by
-    # the event charset.
-    leading_space = bool(text and text[0].isspace())
-    value = normalize_english(text)
+    # normalize_english() intentionally trims machine-translated UI text.
+    # Manual event text is different: its edge spaces are visible layout data,
+    # and the acquisition suffix also requires a leading separator. Preserve
+    # every entered edge space and convert it to the full-width CP932 space
+    # understood by the private event charset.
+    leading_spaces = len(text) - len(text.lstrip())
+    trailing_spaces = len(text) - len(text.rstrip())
+    core_end = len(text) - trailing_spaces if trailing_spaces else len(text)
+    value = normalize_english(text[leading_spaces:core_end])
     tokens = list(format_tokens(value))
     markers: list[tuple[str, str]] = []
     for index, token in enumerate(tokens):
@@ -1927,9 +1929,7 @@ def _fullwidth_event_text(text: str) -> str:
     )
     for marker, token in markers:
         value = value.replace(marker, token)
-    if leading_space:
-        value = "\u3000" + value
-    return value
+    return "\u3000" * leading_spaces + value + "\u3000" * trailing_spaces
 
 
 def _pair_serialized_text_is_safe(entry: TextEntry, translation: str) -> bool:
@@ -1980,7 +1980,7 @@ def repair_entry_translation(entry: TextEntry, translation: str) -> str:
     if entry.key not in PAIR_SERIALIZED_TEXT_KEYS:
         return translation
 
-    body = normalize_english(translation).strip()
+    body = translation
     if entry.key in PAIR_SERIALIZED_PREFIX_KEYS:
         body = " " + body.lstrip()
     repaired = _fullwidth_event_text(body)
