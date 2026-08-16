@@ -303,10 +303,24 @@ PAIR_SERIALIZED_TEXT_FALLBACKS = {
     "9:51C6C": "GOD BLESS YOU",
     "9:51D0A": "NOT ENOUGH GOLD",
     "9:5264C": " FOUND!",
+    # Default ending-credit roles are copied into created RPG project data and
+    # decoded through the same compact glyph table.  ASCII looks like kana in
+    # the editor; canonical full-width Latin survives the round trip.
+    "-1:C9DB4": "PLANNING",
+    "-1:C9DBC": "DESIGN",
+    "-1:C9DCC": "SCENARIO",
+    "-1:C9DD8": "PROGRESS",
+    "-1:C9DE0": "TESTING",
 }
 
 PAIR_SERIALIZED_TEXT_KEYS = frozenset(PAIR_SERIALIZED_TEXT_FALLBACKS)
 PAIR_SERIALIZED_PREFIX_KEYS = frozenset({"9:5264C"})
+CREDIT_ROLE_TEXT_KEYS = frozenset({
+    "-1:C9DB4", "-1:C9DBC", "-1:C9DCC", "-1:C9DD8", "-1:C9DE0",
+})
+# Unlike the easy-event templates, these source defaults have direct ARM9
+# pointers and may safely use the existing text-pool relocation machinery.
+RELOCATABLE_PAIR_SERIALIZED_TEXT_KEYS = CREDIT_ROLE_TEXT_KEYS
 
 # The easy-event/template block may have layout-sensitive consumers that are
 # not visible in the direct-pointer index. Conservatively keep the whole block
@@ -1939,7 +1953,9 @@ def _pair_serialized_text_is_safe(entry: TextEntry, translation: str) -> bool:
         raw = translation.encode("cp932")
     except UnicodeEncodeError:
         return False
-    if len(raw) > entry.max_bytes or len(raw) % 2:
+    if ((entry.key not in RELOCATABLE_PAIR_SERIALIZED_TEXT_KEYS
+         and len(raw) > entry.max_bytes)
+            or len(raw) % 2):
         return False
     if (entry.key in PAIR_SERIALIZED_PREFIX_KEYS
             and not translation.startswith("\u3000")):
@@ -1979,6 +1995,16 @@ def repair_entry_translation(entry: TextEntry, translation: str) -> str:
 
     if entry.key not in PAIR_SERIALIZED_TEXT_KEYS:
         return translation
+
+    # These defaults are data-format fields, not ordinary display strings.
+    # Always use the reviewed canonical wording instead of converting an old
+    # abbreviation such as "Plnn" into equally unclear full-width text.
+    if entry.key in CREDIT_ROLE_TEXT_KEYS:
+        fallback = _fullwidth_event_text(PAIR_SERIALIZED_TEXT_FALLBACKS[entry.key])
+        if (_pair_serialized_text_is_safe(entry, fallback)
+                and translation_is_safe(entry.original, fallback)):
+            return fallback
+        return ""
 
     body = translation
     if entry.key in PAIR_SERIALIZED_PREFIX_KEYS:

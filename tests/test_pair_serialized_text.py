@@ -85,6 +85,28 @@ class PairSerializedTextTests(unittest.TestCase):
         entry.overlay = 8
         self.assertEqual(repair_entry_translation(entry, entry.translation), "I got it!")
 
+    def test_ending_credit_roles_use_canonical_fullwidth_text(self) -> None:
+        cases = (
+            (0xC9DB4, 4, "\u4f01\u753b", "Plnn", "PLANNING"),
+            (0xC9DBC, 14, "\u30b2\u30fc\u30e0\u30c7\u30b6\u30a4\u30f3", "game design", "DESIGN"),
+            (0xC9DCC, 8, "\u30b7\u30ca\u30ea\u30aa", "scenario", "SCENARIO"),
+            (0xC9DD8, 4, "\u9032\u884c", "Prgr", "PROGRESS"),
+            (0xC9DE0, 12, "\u30c6\u30b9\u30c8\u30d7\u30ec\u30a4", "Test Play", "TESTING"),
+        )
+        for offset, max_bytes, original, old, canonical in cases:
+            with self.subTest(offset=hex(offset)):
+                entry = TextEntry(-1, offset, 0x02000000 + offset,
+                                  max_bytes, original, old)
+                repaired = repair_entry_translation(entry, old)
+                self.assertEqual(repaired, _fullwidth_event_text(canonical))
+                entry.translation = repaired
+                self.assertTrue(entry_translation_is_safe(entry))
+                self.assertEqual(len(repaired), len(canonical))
+
+    def test_unrelated_arm9_text_is_not_forced_to_fullwidth(self) -> None:
+        entry = TextEntry(-1, 0x1234, 0x02005234, 4, "\u4f01\u753b", "Plan")
+        self.assertEqual(repair_entry_translation(entry, entry.translation), "Plan")
+
 
 if __name__ == "__main__":
     unittest.main()
