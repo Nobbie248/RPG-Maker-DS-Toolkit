@@ -150,6 +150,17 @@ DS_PLUS_DIRECT_BOOT_ARM9_PATCHES = (
     (0x02055B48, 0xEBFFD4DE, 0xE320F000),
     (0x02055C20, 0xEBFFD4A8, 0xE320F000),
 )
+
+# DS+ allocates the editable-map canvas work map at 0x02017230. The stock
+# instruction reserves two bytes for each 8x8 map cell, but the fence renderer
+# writes an eight-byte work record per cell. A live capture from the current
+# build proved that these records crossed the allocation boundary and replaced
+# the following CEbHeap header. Reserve the actual eight-byte record size. This
+# is temporary canvas memory only; map/save formats and rendered data are not
+# changed.
+DS_PLUS_CANVAS_CAPACITY_PATCH = (
+    0x02017230, 0xE1A00081, 0xE1A00181,  # LSL r0,r1,#1 -> LSL r0,r1,#3
+)
 DS_PLUS_DIRECT_BOOT_OVERLAY_PATCHES = ()
 
 # Verified CP932 prose/UI pools in the decompressed ARM9. Other pointer targets
@@ -329,6 +340,14 @@ NON_RELOCATABLE_RANGES = (
     (9, 0x51A80, 0x51E20),
 )
 
+PACKED_LABEL_PAIRS = (
+    # The save-overwrite dialog points only at the first label and the UI code
+    # walks one fixed-width label block. The Japanese bytes are
+    # b"\x82\xcd\x82\xa2\x82\xa2\x82\xa2\x82\xa6\0"; inserting a NUL after
+    # the first English label makes the second button blank.
+    ("5:7C6A4", "5:7C6A8"),
+)
+
 
 def profile_for_rom(rom: ndspy.rom.NintendoDSRom) -> ROMProfile:
     profile = ROM_PROFILES.get(bytes(rom.idCode))
@@ -432,11 +451,11 @@ def _patch_instruction(data: bytearray, ram_address: int, address: int,
                        expected: int, replacement: int, region: str) -> None:
     offset = address - ram_address
     if offset < 0 or offset + 4 > len(data):
-        raise ValueError(f"Direct-boot patch address {address:#010x} is outside {region}")
+        raise ValueError(f"Binary patch address {address:#010x} is outside {region}")
     actual = struct.unpack_from("<I", data, offset)[0]
     if actual != expected:
         raise ValueError(
-            f"Direct-boot patch expected {expected:#010x} at {address:#010x} "
+            f"Binary patch expected {expected:#010x} at {address:#010x} "
             f"in {region}, found {actual:#010x}; refusing to patch an unknown ROM"
         )
     struct.pack_into("<I", data, offset, replacement)
@@ -543,6 +562,18 @@ def apply_ds_plus_direct_boot(rom: ndspy.rom.NintendoDSRom) -> None:
         )
     rom.files[overlay.fileID] = overlay.save(compress=True)
     rom.arm9OverlayTable = ndspy.code.saveOverlayTable(overlays)
+
+
+def apply_ds_plus_runtime_fixes(rom: ndspy.rom.NintendoDSRom) -> None:
+    """Apply verified DS+ engine fixes needed by ordinary translated builds."""
+    if bytes(rom.idCode) != b"VEBJ":
+        return
+    arm9 = bytearray(ndspy.codeCompression.decompress(bytes(rom.arm9)))
+    address, expected, replacement = DS_PLUS_CANVAS_CAPACITY_PATCH
+    _patch_instruction(
+        arm9, rom.arm9RamAddress, address, expected, replacement, "ARM9",
+    )
+    rom.arm9 = _compress_arm9(bytes(arm9), rom.arm9RamAddress)
 
 
 def _compress_arm9(data: bytes, ram_address: int) -> bytearray:
@@ -2270,9 +2301,32 @@ def _apply_region_entries(data: bytearray, ram_address: int,
         )
 
     selected_keys = {entry.key for entry in selected}
+    packed_keys: set[str] = set()
+    entries_by_key = {entry.key: entry for entry in translated}
+    for first_key, second_key in PACKED_LABEL_PAIRS:
+        first = entries_by_key.get(first_key)
+        second = entries_by_key.get(second_key)
+        if not first or not second or first.key in selected_keys or second.key in selected_keys:
+            continue
+        if second.offset != first.offset + first.max_bytes:
+            raise ValueError(
+                f"Packed label pair {first.key}/{second.key} is not contiguous"
+            )
+        first_raw = b"" if first.translation == " " else first.translation.encode("cp932")
+        second_raw = b"" if second.translation == " " else second.translation.encode("cp932")
+        if len(first_raw) > first.max_bytes or len(second_raw) > second.max_bytes:
+            raise ValueError(
+                f"Packed label pair {first.key}/{second.key} must fit its fixed fields"
+            )
+        data[first.offset : second.offset + second.max_bytes] = (
+            first_raw.ljust(first.max_bytes, b" ")
+            + second_raw.ljust(second.max_bytes, b" ")
+        )
+        packed_keys.update((first.key, second.key))
+
     # Ordinary replacements retain the old minimal-change behavior.
     for entry in translated:
-        if entry.key in selected_keys:
+        if entry.key in selected_keys or entry.key in packed_keys:
             continue
         raw = b"" if entry.translation == " " else entry.translation.encode("cp932")
         data[entry.offset : entry.offset + entry.max_bytes] = (
@@ -2403,6 +2457,7 @@ def compile_rom(source_rom: Path, output_rom: Path, entries: Iterable[TextEntry]
                 raise ValueError(f"Sound sample index is out of range: {key}")
             archive.waves[wave_index] = ndspy.soundWave.SWAV(raw_wave)
         rom.setFileByName("sound/sound_data.sdat", bytes(sdat.save()))
+    apply_ds_plus_runtime_fixes(rom)
     if embedded_project is not None:
         apply_ds_plus_direct_boot(rom)
     rom.saveToFile(output_rom, updateDeviceCapacity=True)

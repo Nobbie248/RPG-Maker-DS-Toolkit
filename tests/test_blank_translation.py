@@ -45,6 +45,20 @@ class IntentionalBlankTranslationTests(unittest.TestCase):
             _source, rows, _images, _embedded = load_project(project)
             self.assertEqual(rows[entry.key]["translation"], " ")
 
+    def test_save_dialog_yes_no_labels_stay_packed(self):
+        offset = 0x7C6A4
+        data = bytearray(offset + 12)
+        data[offset:offset + 11] = b"\x82\xcd\x82\xa2\x82\xa2\x82\xa2\x82\xa6\0"
+        entries = [
+            TextEntry(5, offset, 0x021A07E4, 4, "はい", "YES"),
+            TextEntry(5, offset + 4, 0x021A07E8, 6, "いいえ", "NO"),
+        ]
+
+        applied = _apply_region_entries(data, 0x02124140, entries, "overlay 5")
+
+        self.assertEqual(applied, 2)
+        self.assertEqual(data[offset:offset + 11], b"YES NO    \0")
+
 
 if __name__ == "__main__":
     unittest.main()
