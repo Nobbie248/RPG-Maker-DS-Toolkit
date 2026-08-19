@@ -6,6 +6,9 @@ $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $AppName = "RPG Maker DS Toolkit"
 $DistDir = Join-Path $ProjectRoot "dist"
 $BuiltExe = Join-Path $DistDir "$AppName.exe"
+$IconPath = Join-Path $ProjectRoot "assets\app_icon.ico"
+$AssetsDir = Join-Path $ProjectRoot "assets"
+$XdeltaPath = Join-Path $ProjectRoot "tools\xdelta3.exe"
 $NativeSource = Join-Path $ProjectRoot "native\ncsf_preview"
 $NativeBuild = Join-Path $NativeSource "build"
 $NativeRenderer = Join-Path $NativeBuild "rpgds_ncsf_preview.exe"
@@ -30,6 +33,9 @@ if ($LASTEXITCODE -ne 0) { throw "Native audio renderer build failed with exit c
     --name $AppName `
     --distpath $DistDir `
     --workpath (Join-Path $ProjectRoot "build") `
+    --icon $IconPath `
+    --add-data "$AssetsDir;assets" `
+    --add-binary "$XdeltaPath;tools" `
     --add-binary "$NativeRenderer;." `
     (Join-Path $ProjectRoot "rpgds_gui.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }

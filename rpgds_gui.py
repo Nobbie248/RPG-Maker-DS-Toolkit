@@ -6,6 +6,10 @@ import io
 import json
 import os
 import queue
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import traceback
 from pathlib import Path
@@ -75,6 +79,8 @@ from rpgds_audio import (
 
 APP_NAME = "RPG Maker DS Toolkit"
 APP_VERSION = "v.0.9.0"
+APP_ICON_NAME = "app_icon.ico"
+APP_ICON_PHOTO_NAME = "app_icon.png"
 UI_BG = "#0b0f14"
 UI_PANEL = "#10161d"
 UI_CONTROL = "#1b2530"
@@ -109,6 +115,29 @@ def _legacy_settings_path() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     root = Path(base) if base else Path.home() / "AppData" / "Local"
     return root / "RPGDS Translator" / "settings.json"
+
+
+def app_resource_path(name: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "assets" / name
+
+
+def tool_resource_path(name: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "tools" / name
+
+
+def configure_windows_app_identity() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            f"Nobbie248.{APP_NAME}.{APP_VERSION}"
+        )
+    except (AttributeError, OSError):
+        pass
 
 
 
@@ -154,6 +183,7 @@ class TranslatorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_NAME} {APP_VERSION}")
+        self._set_application_icon()
         self.overrideredirect(True)
         self._drag_origin: tuple[int, int] | None = None
         self._normal_geometry: str | None = None
@@ -192,6 +222,24 @@ class TranslatorApp(tk.Tk):
         self._build_ui()
         self.after(100, self._poll_worker)
         self.after(250, self._auto_load_last_session)
+
+    def _set_application_icon(self) -> None:
+        icon_path = app_resource_path(APP_ICON_NAME)
+        if not icon_path.is_file():
+            return
+        try:
+            self.iconbitmap(default=str(icon_path))
+        except tk.TclError:
+            pass
+        photo_path = app_resource_path(APP_ICON_PHOTO_NAME)
+        if not photo_path.is_file():
+            return
+        try:
+            icon = tk.PhotoImage(file=str(photo_path))
+            self.iconphoto(True, icon)
+            self._window_icon = icon
+        except tk.TclError:
+            pass
 
     def _build_window_caption(self) -> None:
         caption = tk.Frame(self, background="#000000", height=31)
@@ -728,6 +776,10 @@ class TranslatorApp(tk.Tk):
             action, text="Compile Standard ROM", command=self.compile, style="Primary.TButton",
         )
         self.compile_button.pack(side=tk.RIGHT)
+        ttk.Button(
+            action, text="Build Delta Patch", command=self.build_delta_patch,
+            style="Secondary.TButton",
+        ).pack(side=tk.RIGHT, padx=(0, 10))
         log_frame = tk.Frame(page, background=UI_BORDER, padx=1, pady=1)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(12, 18))
         tk.Label(
@@ -2018,6 +2070,92 @@ class TranslatorApp(tk.Tk):
             return
         self._start_compile(Path(output), None)
 
+    def build_delta_patch(self) -> None:
+        if not self.source_rom:
+            messagebox.showinfo(APP_NAME, "Open the original ROM first.")
+            return
+        bundled_xdelta = tool_resource_path("xdelta3.exe")
+        xdelta = (
+            str(bundled_xdelta) if bundled_xdelta.is_file()
+            else shutil.which("xdelta3") or shutil.which("xdelta")
+        )
+        if not xdelta:
+            messagebox.showerror(
+                APP_NAME,
+                "xdelta3 was not found.\n\nPlace xdelta3.exe in the tools folder, "
+                "or install xdelta3 on PATH, then use Build Delta Patch again.",
+            )
+            return
+        default_modified = self.source_rom.parent / self.profile.output_name
+        initial_modified = default_modified if default_modified.is_file() else self.source_rom.parent
+        modified = filedialog.askopenfilename(
+            title="Select patched English ROM",
+            initialdir=str(initial_modified.parent if initial_modified.is_file() else initial_modified),
+            initialfile=initial_modified.name if initial_modified.is_file() else "",
+            filetypes=(("Nintendo DS ROM", "*.nds"), ("All files", "*.*")),
+        )
+        if not modified:
+            return
+        modified_path = Path(modified)
+        if modified_path.resolve() == self.source_rom.resolve():
+            messagebox.showerror(APP_NAME, "The patched ROM must be different from the original ROM.")
+            return
+        default_name = modified_path.with_suffix(".xdelta").name
+        output = filedialog.asksaveasfilename(
+            title="Save delta patch",
+            initialdir=str(modified_path.parent),
+            initialfile=default_name,
+            defaultextension=".xdelta",
+            filetypes=(("Xdelta patch", "*.xdelta"), ("All files", "*.*")),
+        )
+        if not output:
+            return
+        output_path = Path(output)
+
+        def progress(current, total, status):
+            self.worker_queue.put(("progress", current, total, status))
+
+        def task():
+            progress(1, 3, "Building Xdelta patch...")
+            command = [
+                xdelta, "-e", "-S", "none", "-f", "-s",
+                str(self.source_rom), str(modified_path), str(output_path),
+            ]
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            if completed.returncode:
+                detail = completed.stderr.strip() or completed.stdout.strip() or "xdelta failed"
+                raise ValueError(detail)
+            progress(2, 3, "Verifying delta patch...")
+            with tempfile.TemporaryDirectory() as folder:
+                verified_path = Path(folder) / "verified.nds"
+                verify = subprocess.run(
+                    [
+                        xdelta, "-d", "-f", "-s",
+                        str(self.source_rom), str(output_path), str(verified_path),
+                    ],
+                    capture_output=True, text=True, check=False,
+                )
+                if verify.returncode:
+                    detail = verify.stderr.strip() or verify.stdout.strip() or "xdelta verify failed"
+                    raise ValueError(detail)
+                if sha256_file(verified_path) != sha256_file(modified_path):
+                    raise ValueError("Delta patch verification failed: rebuilt ROM hash did not match.")
+            progress(3, 3, "Delta patch complete.")
+            return output_path
+
+        def done(path: Path):
+            self.status_var.set(f"Delta patch built: {path.name}")
+            self.append_log(
+                f"Built and verified Xdelta patch\nSource: {self.source_rom}\n"
+                f"Modified: {modified_path}\nPatch: {path}\n"
+                f"Source SHA-256: {sha256_file(self.source_rom)}\n"
+                f"Modified SHA-256: {sha256_file(modified_path)}"
+            )
+            messagebox.showinfo(APP_NAME, f"Delta patch built and verified successfully.\n\n{path}")
+
+        self.status_var.set("Building delta patch...")
+        self._run_worker(task, done)
+
     def _start_compile(self, output_path: Path,
                        embedded_project: EmbeddedProject | None) -> None:
         """Compile either a normal ROM or a one-time direct-boot ROM.
@@ -2086,6 +2224,7 @@ class TranslatorApp(tk.Tk):
 
 
 def main() -> None:
+    configure_windows_app_identity()
     app = TranslatorApp()
     app.mainloop()
 
