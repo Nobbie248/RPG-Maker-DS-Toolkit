@@ -3,12 +3,11 @@
 # RPG Maker DS Toolkit
 
 An unofficial Windows development, translation, and modding toolkit for the
-Japanese Nintendo DS releases of **RPG Tsukuru DS** and **RPG Tsukuru DS+**.
+Japanese Nintendo DS release of **RPG Tsukuru DS+**.
 
-The current project focuses on **RPG Tsukuru DS+: Create the New World**. It
-translates the editor interface, help text, generated event text, menus, and
-graphical interface assets while preserving the original game and save-data
-formats.
+The toolkit targets **RPG Tsukuru DS+: Create the New World**. It translates
+the editor interface, help text, generated event text, menus, and graphical
+interface assets while preserving the original game and save-data formats.
 
 > **Release status:** Active development and testing. This repository does not
 > currently provide a public translation patch or any Nintendo ROM data.
@@ -19,7 +18,7 @@ formats.
 - Reuses verified text storage and safely relocates longer translations within
   the same loaded code unit.
 - Preserves runtime formatting tokens and parser-critical metadata.
-- Exports, previews, and imports the games' CHBG graphical assets as PNGs.
+- Exports, previews, and imports RPG Tsukuru DS+ CHBG graphical assets as PNGs.
 - Preserves palette roles and tile IDs used by highlighted or animated UI.
 - Reuses genuinely unused palette entries for suitable static artwork.
 - Removes PNG metadata and validates dimensions, palette conversion, tile
@@ -36,11 +35,10 @@ formats.
   mirrored created-game slots, and builds a one-time direct-boot ROM from the
   selected project without changing the saved toolkit project.
 
-## Supported games
+## Supported game
 
 | Game | Game code | Clean ROM SHA-256 |
 | --- | --- | --- |
-| RPG Tsukuru DS (Japan) | `V29J` | `5E845B09DA14C8CE80D50ACCFB1EBC6A350F4A4A5CE1DB1D6CF8439416F9D7CF` |
 | RPG Tsukuru DS+: Create the New World (Japan) | `VEBJ` | `D1FF98FE4FDE406B004D3C45986216F9EB67D3C765F1B2F16213677E005E216F` |
 
 The ROM must match the appropriate clean SHA-256. A different revision,
@@ -70,7 +68,7 @@ modified dump, or damaged file should not be used.
    the translation work.
 10. Open **Compile ROM** to create a separate test ROM.
 
-For DS+, **Build Direct-Boot ROM from Save** reads the four created-game slots
+**Build Direct-Boot ROM from Save** reads the four created-game slots
 from a raw `.sav` or DeSmuME `.dsv`. Only populated slots with matching redundant
 safety copies and valid integrity markers can be selected. The selected slot is
 used for that build only: it is not attached to or saved inside the loaded
@@ -129,7 +127,6 @@ decoded CHBG allocation is the relevant safety limit for game memory.
 
 ## Current project scope
 
-- RPG Tsukuru DS profile: 5,198 exposed text records and 660 CHBG graphics.
 - RPG Tsukuru DS+ profile: 4,137 exposed text records and 841 CHBG graphics.
 - The DS+ project embeds its current translated text and replacement artwork in
   `RPG Tsukuru DS+ English.rpgdsproj`.
@@ -229,6 +226,6 @@ Naram Qashat, adapted from the **FeOS Sound System** by fincs and incorporating
 Nintendo DS audio behavior studied by the DeSmuME project. Its license is
 included at `native/ncsf_preview/LICENSE-in_xsf.txt`.
 
-RPG Maker, RPG Tsukuru DS, and RPG Tsukuru DS+ are properties of their
-respective copyright holders. This is an unofficial fan project and is not
-affiliated with or endorsed by Nintendo or Enterbrain.
+RPG Maker and RPG Tsukuru DS+ are properties of their respective copyright
+holders. This is an unofficial fan project and is not affiliated with or
+endorsed by Nintendo or Enterbrain.
